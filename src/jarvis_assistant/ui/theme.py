@@ -1,34 +1,37 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QMouseEvent, QPainter, QPaintEvent
+from PySide6.QtWidgets import QStyle, QStyleOption, QWidget
 
 WINDOW_STYLE = """
 QWidget#glassSurface {
-    background-color: rgba(5, 7, 10, 184);
-    color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 32);
-    border-radius: 14px;
+    background-color: rgba(238, 243, 247, 224);
+    color: #1d2b38;
+    border: 1px solid rgba(255, 255, 255, 220);
+    border-radius: 16px;
     font-family: "Microsoft YaHei UI", "Segoe UI";
 }
-QLabel#mutedLabel { color: rgba(255, 255, 255, 150); }
+QLabel#mutedLabel { color: #6e7e8d; }
 QPushButton {
-    background-color: rgba(255, 255, 255, 24);
-    color: #ffffff;
+    background-color: rgba(255, 255, 255, 225);
+    color: #1d2b38;
     border: 0;
-    border-radius: 7px;
+    border-radius: 8px;
     padding: 6px 10px;
 }
-QPushButton:hover { background-color: rgba(255, 255, 255, 40); }
-QPushButton#primaryButton { background-color: rgba(255, 255, 255, 235); color: #0b0d11; }
+QPushButton:hover { background-color: #ffffff; }
+QPushButton#primaryButton { background-color: #356db7; color: #ffffff; }
+QPushButton#primaryButton:hover { background-color: #2d61a6; }
 QLineEdit, QTextBrowser, QComboBox {
-    background-color: rgba(255, 255, 255, 18);
-    color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 22);
-    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 205);
+    color: #1d2b38;
+    border: 1px solid rgba(255, 255, 255, 235);
+    border-radius: 10px;
     padding: 7px;
 }
+QLineEdit { min-height: 24px; }
+QTextBrowser { selection-background-color: #cdddf2; }
 """
 
 
@@ -37,6 +40,7 @@ class DraggableGlassWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("glassSurface")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
@@ -57,6 +61,19 @@ class DraggableGlassWidget(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, enabled)
         if self.isVisible():
             self.show()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        option = QStyleOption()
+        option.initFrom(self)
+        painter = QPainter(self)
+        self.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_Widget,
+            option,
+            painter,
+            self,
+        )
+        painter.end()
+        super().paintEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() is Qt.MouseButton.LeftButton:

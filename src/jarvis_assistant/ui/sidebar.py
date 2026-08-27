@@ -11,11 +11,11 @@ class CompactSidebar(DraggableGlassWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(220)
-        self.setMinimumHeight(118)
+        self.setFixedWidth(190)
+        self.setMinimumHeight(148)
 
         title = QLabel("Jarvis")
-        self.model_label = QLabel("本地 · qwen2.5:3b")
+        self.model_label = QLabel("本地")
         self.model_label.setObjectName("mutedLabel")
         header = QHBoxLayout()
         header.addWidget(title)
@@ -24,15 +24,19 @@ class CompactSidebar(DraggableGlassWidget):
 
         self.result_label = QLabel("准备就绪")
         self.result_label.setWordWrap(True)
+        self.open_latest_button = QPushButton("打开最新")
         self.expand_button = QPushButton("展开")
+        self.open_latest_button.clicked.connect(self.expand_requested)
         self.expand_button.clicked.connect(self.expand_requested)
 
         actions = QHBoxLayout()
-        actions.addStretch()
+        actions.addWidget(self.open_latest_button)
         actions.addWidget(self.expand_button)
+        actions.addStretch()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(13, 11, 13, 11)
+        layout.setContentsMargins(14, 13, 14, 13)
+        layout.setSpacing(10)
         layout.addLayout(header)
         layout.addWidget(self.result_label)
         layout.addLayout(actions)

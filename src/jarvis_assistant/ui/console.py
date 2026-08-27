@@ -21,7 +21,7 @@ class TaskConsole(DraggableGlassWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(380)
+        self.setFixedWidth(354)
         self.setMinimumHeight(330)
         self._action_id: str | None = None
 
@@ -62,10 +62,11 @@ class TaskConsole(DraggableGlassWidget):
         self.input.returnPressed.connect(self._submit)
         input_layout = QHBoxLayout()
         input_layout.addWidget(self.input)
-        input_layout.addWidget(self.send_button)
+        self.send_button.hide()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 13, 14, 13)
+        layout.setContentsMargins(16, 15, 16, 15)
+        layout.setSpacing(11)
         layout.addLayout(header)
         layout.addWidget(self.conversation)
         layout.addWidget(self.confirmation_frame)
