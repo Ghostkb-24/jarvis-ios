@@ -64,7 +64,7 @@ py -3.12 -m jarvis_assistant
 py -3.12 -m PyInstaller --clean jarvis-assistant.spec
 ```
 
-输出位于 `dist/JarvisDesktopAssistant/JarvisDesktopAssistant.exe`。Ollama 模型和 OpenAI 凭据不会打包进程序。
+输出位于 `dist/JarvisDesktopAssistant.exe`，是可以独立复制到桌面运行的单文件程序。Ollama 模型和 OpenAI 凭据不会打包进程序。
 
 ## 常见问题
 

@@ -24,8 +24,9 @@ pyz = PYZ(analysis.pure)
 exe = EXE(
     pyz,
     analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
     [],
-    exclude_binaries=True,
     name="JarvisDesktopAssistant",
     debug=False,
     bootloader_ignore_signals=False,
@@ -33,12 +34,4 @@ exe = EXE(
     upx=True,
     console=False,
     disable_windowed_traceback=False,
-)
-collection = COLLECT(
-    exe,
-    analysis.binaries,
-    analysis.datas,
-    strip=False,
-    upx=True,
-    name="JarvisDesktopAssistant",
 )
