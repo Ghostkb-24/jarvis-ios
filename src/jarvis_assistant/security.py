@@ -76,6 +76,10 @@ class SecurityPolicy:
 def _summarize(proposal: ToolProposal) -> str:
     if proposal.tool_name == "clipboard":
         return "将模型提供的文本写入剪贴板（内容已隐藏）。"
+    if proposal.tool_name == "send_wechat_message":
+        contact = str(proposal.arguments.get("contact", ""))
+        message = str(proposal.arguments.get("message", ""))
+        return f"准备向微信联系人“{contact}”发送：\n{message}"
     safe_arguments = redact_value(proposal.arguments)
     compact = json.dumps(safe_arguments, ensure_ascii=False, sort_keys=True)
     return f"执行 {proposal.tool_name}：{compact}"

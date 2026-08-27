@@ -57,7 +57,7 @@ class Settings(StrictModel):
     ollama_model: str = "qwen2.5:3b"
     openai_model: str = "gpt-5.4-mini"
     allowed_search_roots: list[Path] = Field(default_factory=list)
-    always_on_top: bool = True
+    always_on_top: bool = False
     click_through: bool = False
     sidebar_visible: bool = True
     microphone_name: str | None = None
@@ -68,3 +68,5 @@ class Settings(StrictModel):
     console_y: int | None = None
     capsule_x: int | None = None
     capsule_y: int | None = None
+    sidebar_locked: bool = False
+    console_locked: bool = False

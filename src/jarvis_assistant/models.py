@@ -178,6 +178,8 @@ def _build_prompt(request: ModelRequest, schema: dict[str, Any]) -> str:
     return (
         "你是 Windows 桌面助手。只输出符合 JSON Schema 的对象。"
         "只有当用户明确要求执行动作时才选择工具；否则直接回答。\n"
+        "打开已安装的应用（例如微信）必须使用 open_application，不能使用 open_website。\n"
+        "用户要求给微信联系人发送消息时必须使用 send_wechat_message。\n"
         f"可用工具：{json.dumps(request.tool_catalog, ensure_ascii=False)}\n"
         f"响应 Schema：{json.dumps(schema, ensure_ascii=False)}\n"
         f"用户请求：{request.text}"
@@ -193,6 +195,8 @@ def _response_schema() -> dict[str, Any]:
 def _system_instructions(tool_catalog: list[dict[str, Any]]) -> str:
     return (
         "你是 Windows 桌面助手。只返回指定结构。只有用户明确要求执行动作时才选择工具。"
+        "打开已安装的应用（例如微信）必须使用 open_application，不能使用 open_website。"
+        "用户要求给微信联系人发送消息时必须使用 send_wechat_message。"
         "不得创造未列出的工具。可用工具："
         + json.dumps(tool_catalog, ensure_ascii=False)
     )

@@ -36,3 +36,17 @@ def test_invalid_arguments_are_rejected_before_execution() -> None:
     )
     assert decision.kind is DecisionKind.REJECT
     assert decision.code == "invalid_arguments"
+
+
+def test_wechat_message_requires_confirmation_with_recipient_and_message_preview() -> None:
+    policy = SecurityPolicy(default_registry())
+    decision = policy.evaluate(
+        ToolProposal(
+            tool_name="send_wechat_message",
+            arguments={"contact": "Ghost（小号）", "message": "今晚八点见"},
+        )
+    )
+
+    assert decision.kind is DecisionKind.REQUIRE_CONFIRMATION
+    assert "Ghost（小号）" in decision.summary
+    assert "今晚八点见" in decision.summary

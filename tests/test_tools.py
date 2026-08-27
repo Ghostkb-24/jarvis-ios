@@ -43,6 +43,54 @@ def test_open_website_rejects_non_http_scheme() -> None:
     assert result.code == "invalid_arguments"
 
 
+def test_open_wechat_uses_local_installed_application() -> None:
+    launched: list[list[str]] = []
+    registry = default_registry(process_launcher=lambda command: launched.append(list(command)))
+
+    result = registry.execute(
+        ToolProposal(tool_name="open_application", arguments={"name": "微信"})
+    )
+
+    assert result.ok
+    assert launched == [[r"C:\Program Files\Tencent\Weixin\Weixin.exe"]]
+
+
+def test_open_wechat_activates_existing_window_without_new_process() -> None:
+    launched: list[list[str]] = []
+    activated: list[str] = []
+    registry = default_registry(
+        process_launcher=lambda command: launched.append(list(command)),
+        application_activator=lambda process_name: activated.append(process_name) or True,
+    )
+
+    result = registry.execute(
+        ToolProposal(tool_name="open_application", arguments={"name": "微信"})
+    )
+
+    assert result.ok
+    assert result.code == "activated"
+    assert activated == ["Weixin.exe"]
+    assert launched == []
+
+
+def test_send_wechat_message_uses_contact_and_message() -> None:
+    sent: list[tuple[str, str]] = []
+    registry = default_registry(
+        wechat_sender=lambda contact, message: sent.append((contact, message)) or True
+    )
+
+    result = registry.execute(
+        ToolProposal(
+            tool_name="send_wechat_message",
+            arguments={"contact": "Ghost（小号）", "message": "今晚八点见"},
+        )
+    )
+
+    assert result.ok
+    assert result.code == "sent"
+    assert sent == [("Ghost（小号）", "今晚八点见")]
+
+
 def test_search_files_stays_inside_allowed_root_and_caps_results(tmp_path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()

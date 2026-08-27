@@ -23,7 +23,7 @@ class SettingsDialog(QDialog):
         self.openai_key = QLineEdit()
         self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.always_on_top = QCheckBox()
-        self.always_on_top.setChecked(True)
+        self.always_on_top.setChecked(False)
         self.click_through = QCheckBox()
 
         form = QFormLayout()

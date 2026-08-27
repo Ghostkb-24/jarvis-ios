@@ -11,16 +11,20 @@ class CompactSidebar(DraggableGlassWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(190)
-        self.setMinimumHeight(148)
+        self.setFixedSize(190, 300)
 
         title = QLabel("Jarvis")
         self.model_label = QLabel("本地")
         self.model_label.setObjectName("mutedLabel")
+        self.lock_button = QPushButton("🔓")
+        self.lock_button.setFixedWidth(32)
+        self.lock_button.setToolTip("锁定位置")
+        self.lock_button.clicked.connect(self._toggle_position_lock)
         header = QHBoxLayout()
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.model_label)
+        header.addWidget(self.lock_button)
 
         self.result_label = QLabel("准备就绪")
         self.result_label.setWordWrap(True)
@@ -39,9 +43,18 @@ class CompactSidebar(DraggableGlassWidget):
         layout.setSpacing(10)
         layout.addLayout(header)
         layout.addWidget(self.result_label)
+        layout.addStretch()
         layout.addLayout(actions)
 
     def set_status(self, text: str, *, model: str | None = None) -> None:
         self.result_label.setText(text)
         if model is not None:
             self.model_label.setText(model)
+
+    def _toggle_position_lock(self) -> None:
+        self.set_position_locked(not self.position_locked)
+
+    def set_position_locked(self, locked: bool) -> None:
+        super().set_position_locked(locked)
+        self.lock_button.setText("🔒" if locked else "🔓")
+        self.lock_button.setToolTip("解锁位置" if locked else "锁定位置")

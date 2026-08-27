@@ -28,10 +28,15 @@ class TaskConsole(DraggableGlassWidget):
         title = QLabel("任务控制台")
         self.provider_label = QLabel("Ollama · 本地")
         self.provider_label.setObjectName("mutedLabel")
+        self.lock_button = QPushButton("🔓")
+        self.lock_button.setFixedWidth(32)
+        self.lock_button.setToolTip("锁定位置")
+        self.lock_button.clicked.connect(self._toggle_position_lock)
         header = QHBoxLayout()
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.provider_label)
+        header.addWidget(self.lock_button)
 
         self.conversation = QTextBrowser()
         self.conversation.setOpenExternalLinks(False)
@@ -98,3 +103,11 @@ class TaskConsole(DraggableGlassWidget):
         self.input.clear()
         self.append_message("user", text)
         self.request_submitted.emit(text)
+
+    def _toggle_position_lock(self) -> None:
+        self.set_position_locked(not self.position_locked)
+
+    def set_position_locked(self, locked: bool) -> None:
+        super().set_position_locked(locked)
+        self.lock_button.setText("🔒" if locked else "🔓")
+        self.lock_button.setToolTip("解锁位置" if locked else "锁定位置")

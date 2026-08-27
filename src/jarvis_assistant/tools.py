@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 import webbrowser
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -64,6 +65,16 @@ class ClipboardInput(ToolInput):
 
 class SetVolumeInput(ToolInput):
     percent: int = Field(ge=0, le=100)
+
+
+class WechatMessageInput(ToolInput):
+    contact: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("contact", "message")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
 
 
 class ClipboardAdapter(Protocol):
@@ -188,6 +199,8 @@ def default_registry(
     process_launcher: Callable[[Sequence[str]], Any] | None = None,
     file_launcher: Callable[[str], Any] | None = None,
     browser_opener: Callable[[str], Any] | None = None,
+    application_activator: Callable[[str], bool] | None = None,
+    wechat_sender: Callable[[str, str], bool] | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     roots = tuple(path.resolve() for path in allowed_search_roots)
@@ -196,6 +209,8 @@ def default_registry(
     launch_process = process_launcher or _launch_process
     launch_file = file_launcher or os.startfile
     open_browser = browser_opener or webbrowser.open
+    activate_application = application_activator or _activate_existing_application
+    send_wechat = wechat_sender or _send_wechat_message
 
     application_commands = {
         "notepad": ["notepad.exe"],
@@ -206,6 +221,22 @@ def default_registry(
         "文件资源管理器": ["explorer.exe"],
         "settings": ["cmd.exe", "/c", "start", "", "ms-settings:"],
         "设置": ["cmd.exe", "/c", "start", "", "ms-settings:"],
+        "wechat": [r"C:\Program Files\Tencent\Weixin\Weixin.exe"],
+        "weixin": [r"C:\Program Files\Tencent\Weixin\Weixin.exe"],
+        "微信": [r"C:\Program Files\Tencent\Weixin\Weixin.exe"],
+    }
+    application_processes = {
+        "notepad": "Notepad.exe",
+        "记事本": "Notepad.exe",
+        "calculator": "CalculatorApp.exe",
+        "计算器": "CalculatorApp.exe",
+        "explorer": "explorer.exe",
+        "文件资源管理器": "explorer.exe",
+        "settings": "SystemSettings.exe",
+        "设置": "SystemSettings.exe",
+        "wechat": "Weixin.exe",
+        "weixin": "Weixin.exe",
+        "微信": "Weixin.exe",
     }
 
     def open_application(value: ToolInput) -> ToolResult:
@@ -217,6 +248,9 @@ def default_registry(
                 code="application_not_allowed",
                 message="应用不在白名单中。",
             )
+        process_name = application_processes.get(arguments.name)
+        if process_name and activate_application(process_name):
+            return ToolResult(ok=True, code="activated", message="已切换到正在运行的应用。")
         launch_process(command)
         return ToolResult(ok=True, code="opened", message="应用已打开。")
 
@@ -225,6 +259,16 @@ def default_registry(
         if not open_browser(arguments.url):
             return ToolResult(ok=False, code="operation_failed", message="浏览器未接受请求。")
         return ToolResult(ok=True, code="opened", message="网页已打开。")
+
+    def send_wechat_message(value: ToolInput) -> ToolResult:
+        arguments = _as(value, WechatMessageInput)
+        if not send_wechat(arguments.contact, arguments.message):
+            return ToolResult(
+                ok=False,
+                code="operation_failed",
+                message="未能完成微信发送，请确认微信已登录且联系人名称准确。",
+            )
+        return ToolResult(ok=True, code="sent", message="微信消息已发送。")
 
     def search_files(value: ToolInput) -> ToolResult:
         arguments = _as(value, SearchFilesInput)
@@ -286,7 +330,7 @@ def default_registry(
     for spec in (
         ToolSpec(
             "open_application",
-            "打开白名单中的 Windows 应用",
+            "打开白名单中的本地 Windows 应用（包括微信）；打开微信时不要使用网页工具",
             OpenApplicationInput,
             RiskLevel.LOW,
             open_application,
@@ -297,6 +341,13 @@ def default_registry(
             OpenWebsiteInput,
             RiskLevel.LOW,
             open_website,
+        ),
+        ToolSpec(
+            "send_wechat_message",
+            "在微信中搜索指定联系人并发送消息；必须保留联系人和消息原文",
+            WechatMessageInput,
+            RiskLevel.MEDIUM,
+            send_wechat_message,
         ),
         ToolSpec(
             "search_files",
@@ -311,6 +362,102 @@ def default_registry(
     ):
         registry.register(spec)
     return registry
+
+
+def _activate_existing_application(process_name: str) -> bool:
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    target = process_name.casefold()
+    activated = False
+    process_query_limited_information = 0x1000
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit_window(hwnd, lparam):
+        nonlocal activated
+        del lparam
+        if not user32.IsWindowVisible(hwnd) or user32.GetWindowTextLengthW(hwnd) == 0:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid.value)
+        if not handle:
+            return True
+        try:
+            size = wintypes.DWORD(32768)
+            path = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+                return True
+            if Path(path.value).name.casefold() != target:
+                return True
+            user32.ShowWindow(hwnd, 9)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            activated = True
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+
+    user32.EnumWindows(visit_window, 0)
+    return activated
+
+
+def _send_wechat_message(contact: str, message: str) -> bool:
+    if os.name != "nt" or not _activate_existing_application("Weixin.exe"):
+        return False
+    try:
+        import win32clipboard
+        from pynput.keyboard import Controller, Key
+    except ImportError as error:
+        raise OSError("微信自动化组件不可用。") from error
+
+    keyboard = Controller()
+    previous: str | None = None
+
+    def set_clipboard(text: str) -> None:
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+
+    def paste(text: str) -> None:
+        set_clipboard(text)
+        with keyboard.pressed(Key.ctrl):
+            keyboard.press("v")
+            keyboard.release("v")
+
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
+                previous = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+
+        time.sleep(0.4)
+        with keyboard.pressed(Key.ctrl):
+            keyboard.press("f")
+            keyboard.release("f")
+        time.sleep(0.5)
+        paste(contact)
+        time.sleep(1.0)
+        keyboard.press(Key.enter)
+        keyboard.release(Key.enter)
+        time.sleep(0.8)
+        paste(message)
+        time.sleep(0.3)
+        keyboard.press(Key.enter)
+        keyboard.release(Key.enter)
+        return True
+    finally:
+        if previous is not None:
+            set_clipboard(previous)
 
 
 def _as(value: ToolInput, expected: type[ToolInput]) -> Any:

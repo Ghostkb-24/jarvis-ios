@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from uuid import uuid4
 
@@ -59,6 +60,21 @@ class Orchestrator:
         self._pending_cloud: dict[str, ModelRequest] = {}
 
     async def submit(self, text: str) -> list[OrchestratorEvent]:
+        direct_wechat_message = _direct_wechat_message_request(text)
+        if direct_wechat_message is not None:
+            return self._handle_response(
+                ParsedModelResponse(proposal=direct_wechat_message, confidence=1.0)
+            )
+        direct_application = _direct_application_request(text)
+        if direct_application is not None:
+            response = ParsedModelResponse(
+                proposal=ToolProposal(
+                    tool_name="open_application",
+                    arguments={"name": direct_application},
+                ),
+                confidence=1.0,
+            )
+            return self._handle_response(response)
         request = ModelRequest(text=text, tool_catalog=self._registry.schema_catalog())
         events = [OrchestratorEvent(kind=EventKind.THINKING_LOCAL, message="正在本地处理…")]
         try:
@@ -100,6 +116,10 @@ class Orchestrator:
             self._pending_actions.pop(action_id, None)
             self._pending_cloud.pop(action_id, None)
         return OrchestratorEvent(kind=EventKind.CANCELLED, message="操作已取消。")
+
+    def pending_action_is(self, action_id: str, tool_name: str) -> bool:
+        proposal = self._pending_actions.get(action_id)
+        return proposal is not None and proposal.tool_name == tool_name
 
     def _offer_fallback(self, request: ModelRequest, reason: str) -> list[OrchestratorEvent]:
         if self._cloud_provider is None:
@@ -165,3 +185,36 @@ class Orchestrator:
             False,
             reason,
         )
+
+
+def _direct_application_request(text: str) -> str | None:
+    normalized = "".join(text.strip().casefold().split()).rstrip("。.!！")
+    direct_commands = {
+        "打开微信",
+        "启动微信",
+        "打开wechat",
+        "启动wechat",
+        "打开weixin",
+        "启动weixin",
+    }
+    if normalized in direct_commands:
+        return "微信"
+    return None
+
+
+def _direct_wechat_message_request(text: str) -> ToolProposal | None:
+    match = re.match(
+        r"^\s*(?:请)?(?:用微信|在微信中)?\s*给\s*(?P<contact>.+?)\s*"
+        r"(?:发送消息|发送|发消息|发一条消息)\s*[：:，,]?\s*(?P<message>.+?)\s*[。.!！]?\s*$",
+        text,
+    )
+    if match is None:
+        return None
+    return ToolProposal(
+        tool_name="send_wechat_message",
+        arguments={
+            "contact": match.group("contact").strip(),
+            "message": match.group("message").strip(),
+        },
+        confidence=1.0,
+    )

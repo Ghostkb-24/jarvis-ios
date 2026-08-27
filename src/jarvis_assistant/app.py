@@ -8,7 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
@@ -28,6 +28,7 @@ from jarvis_assistant.ui.capsule import VoiceCapsule
 from jarvis_assistant.ui.console import TaskConsole
 from jarvis_assistant.ui.settings import SettingsDialog
 from jarvis_assistant.ui.sidebar import CompactSidebar
+from jarvis_assistant.wake_word import SherpaWakeBackend, WakeWordListener
 
 
 class QtClipboardAdapter:
@@ -63,6 +64,16 @@ class NoopHotkey:
 
     def close(self) -> None:
         self.closed = True
+
+
+class NoopWakeWord:
+    running = False
+
+    def start(self, callback: Callable[[], None]) -> None:
+        del callback
+
+    def stop(self) -> None:
+        return
 
 
 class MemoryCredentialStore:
@@ -110,6 +121,7 @@ class ApplicationRuntime(QObject):
         bridge: HotkeyBridge,
         recorder: AudioRecorder,
         transcriber: FasterWhisperTranscriber,
+        wake_listener: NoopWakeWord | WakeWordListener,
     ) -> None:
         super().__init__()
         self.store = store
@@ -121,6 +133,8 @@ class ApplicationRuntime(QObject):
         self.bridge = bridge
         self.recorder = recorder
         self.transcriber = transcriber
+        self.wake_listener = wake_listener
+        self.wake_bridge = HotkeyBridge()
         self.sidebar = CompactSidebar()
         self.console = TaskConsole()
         self.capsule = VoiceCapsule()
@@ -144,6 +158,7 @@ class ApplicationRuntime(QObject):
         actions = (
             ("打开控制台", self.console.show),
             ("开始说话", self.toggle_recording),
+            ("常驻唤醒", self.toggle_wake_word),
             ("暂停助手", self.toggle_pause),
             ("设置", self.settings_dialog.show),
             ("退出", self.shutdown),
@@ -179,12 +194,20 @@ class ApplicationRuntime(QObject):
             if settings.capsule_y is not None
             else area.bottom() - self.capsule.height() - 18,
         )
+        self.sidebar.set_position_locked(settings.sidebar_locked)
+        self.console.set_position_locked(settings.console_locked)
+        for window in (self.sidebar, self.console, self.capsule):
+            window.set_always_on_top(settings.always_on_top)
+            window.set_click_through(settings.click_through)
+        self.settings_dialog.always_on_top.setChecked(settings.always_on_top)
+        self.settings_dialog.click_through.setChecked(settings.click_through)
 
     def _connect_signals(self) -> None:
         self.sidebar.expand_requested.connect(self.console.show)
         self.console.request_submitted.connect(self.submit_text)
         self.console.confirmation_answered.connect(self.answer_confirmation)
         self.bridge.activated.connect(self.toggle_recording)
+        self.wake_bridge.activated.connect(self._wake_detected)
         self.settings_dialog.settings_saved.connect(self.save_settings)
 
     @Slot()
@@ -192,11 +215,41 @@ class ApplicationRuntime(QObject):
         self.paused = not self.paused
         self.sidebar.set_status("助手已暂停" if self.paused else "准备就绪")
 
+    @Slot()
+    def toggle_wake_word(self) -> None:
+        if self.wake_listener.running:
+            self.wake_listener.stop()
+            self.sidebar.set_status("常驻唤醒已关闭")
+        else:
+            self._resume_wake()
+
+    @Slot()
+    def _wake_detected(self) -> None:
+        self.wake_listener.stop()
+        self.toggle_recording()
+        QTimer.singleShot(8000, self._finish_wake_recording)
+
+    @Slot()
+    def _finish_wake_recording(self) -> None:
+        if self.recorder.recording:
+            self.toggle_recording()
+
     @Slot(str)
     def submit_text(self, text: str) -> None:
         if self.paused:
             self.sidebar.set_status("助手已暂停")
             return
+        normalized = "".join(text.strip().casefold().split()).rstrip("。.!！")
+        if normalized in {"确认发送", "允许发送"}:
+            pending_wechat = [
+                action_id
+                for action_id, kind in self._pending_kinds.items()
+                if kind is EventKind.CONFIRMATION_REQUIRED
+                and self.orchestrator.pending_action_is(action_id, "send_wechat_message")
+            ]
+            if len(pending_wechat) == 1:
+                self.answer_confirmation(pending_wechat[0], True)
+                return
         self.capsule.show_phase("正在思考…")
         self._run_background(
             lambda: asyncio.run(self.orchestrator.submit(text)),
@@ -225,6 +278,8 @@ class ApplicationRuntime(QObject):
             return
         try:
             if not self.recorder.recording:
+                if self.wake_listener.running:
+                    self.wake_listener.stop()
                 self.recorder.start()
                 self.capsule.show_phase("正在聆听…")
                 return
@@ -262,6 +317,7 @@ class ApplicationRuntime(QObject):
                 self.console.append_message("assistant", event.message)
                 self.sidebar.set_status(event.message)
         self.capsule.hide()
+        self._resume_wake()
 
     def _run_background(
         self,
@@ -281,6 +337,17 @@ class ApplicationRuntime(QObject):
         self.console.append_message("assistant", message)
         self.console.show()
         self.sidebar.set_status(message)
+        self._resume_wake()
+
+    def _resume_wake(self) -> None:
+        if self.paused or self.closed or self.recorder.recording or self.wake_listener.running:
+            return
+        try:
+            self.wake_listener.start(self.wake_bridge.activated.emit)
+            if self.wake_listener.running:
+                self.sidebar.set_status("等待唤醒：你好，Jarvis")
+        except Exception as error:
+            self.sidebar.set_status(f"常驻唤醒不可用：{error}")
 
     @Slot(dict)
     def save_settings(self, values: dict[str, Any]) -> None:
@@ -307,6 +374,7 @@ class ApplicationRuntime(QObject):
         self.closed = True
         self._persist_window_state()
         self.hotkey.close()
+        self.wake_listener.stop()
         if self.recorder.recording:
             with suppress(AudioError):
                 self.recorder.stop()
@@ -326,6 +394,8 @@ class ApplicationRuntime(QObject):
                 "console_y": self.console.y(),
                 "capsule_x": self.capsule.x(),
                 "capsule_y": self.capsule.y(),
+                "sidebar_locked": self.sidebar.position_locked,
+                "console_locked": self.console.position_locked,
             }
         )
         self.store.save_settings(Settings.model_validate(settings))
@@ -380,9 +450,28 @@ def build_application(
         cloud_provider=cloud,
         hotkey=hotkey,
         bridge=bridge,
-        recorder=AudioRecorder(SoundDeviceBackend(device=settings.microphone_name)),
-        transcriber=FasterWhisperTranscriber(),
+        recorder=AudioRecorder(
+            SoundDeviceBackend(device=settings.microphone_name or "Lian II")
+        ),
+        transcriber=FasterWhisperTranscriber(
+            "base", device="cpu", compute_type="int8"
+        ),
+        wake_listener=(
+            NoopWakeWord()
+            if test_mode
+            else WakeWordListener(
+                SherpaWakeBackend(
+                    _resource_path(
+                        "assets", "models", "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+                    ),
+                    _resource_path("assets", "models", "keywords.txt"),
+                    device=settings.microphone_name or "Lian II",
+                )
+            )
+        ),
     )
+    if not test_mode:
+        runtime._resume_wake()
     if settings.sidebar_visible:
         runtime.sidebar.show()
     return runtime

@@ -14,6 +14,17 @@ def test_console_is_compact_translucent_and_hidden_by_default(qtbot) -> None:
     assert console.windowFlags() & Qt.WindowType.FramelessWindowHint
 
 
+def test_floating_windows_follow_normal_click_z_order_by_default(qtbot) -> None:
+    windows = (CompactSidebar(), TaskConsole(), VoiceCapsule())
+    for window in windows:
+        qtbot.addWidget(window)
+
+    assert all(
+        not (window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        for window in windows
+    )
+
+
 def test_confirmation_emits_action_id(qtbot) -> None:
     console = TaskConsole()
     qtbot.addWidget(console)

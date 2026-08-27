@@ -28,9 +28,19 @@ class MemoryClipboard:
         self.value = text
 
 
-def build_orchestrator(tmp_path, local_response, cloud_response=None):
+def build_orchestrator(
+    tmp_path,
+    local_response,
+    cloud_response=None,
+    process_launcher=None,
+    wechat_sender=None,
+):
     clipboard = MemoryClipboard()
-    registry = default_registry(clipboard=clipboard)
+    registry = default_registry(
+        clipboard=clipboard,
+        process_launcher=process_launcher,
+        wechat_sender=wechat_sender,
+    )
     store = SQLiteStore.open(tmp_path / "state.db")
     local = FakeProvider(local_response)
     cloud = FakeProvider(cloud_response) if cloud_response else None
@@ -43,6 +53,24 @@ def build_orchestrator(tmp_path, local_response, cloud_response=None):
         store=store,
     )
     return orchestrator, clipboard, store, local, cloud
+
+
+@pytest.mark.asyncio
+async def test_explicit_open_wechat_command_bypasses_web_routing(tmp_path) -> None:
+    launched: list[list[str]] = []
+    response = ParsedModelResponse(text="不应调用模型", confidence=0.9)
+    orchestrator, _, store, local, _ = build_orchestrator(
+        tmp_path,
+        response,
+        process_launcher=lambda command: launched.append(list(command)),
+    )
+
+    events = await orchestrator.submit("打开微信")
+
+    assert events[-1].kind is EventKind.COMPLETED
+    assert launched == [[r"C:\Program Files\Tencent\Weixin\Weixin.exe"]]
+    assert local.requests == []
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -66,6 +94,30 @@ async def test_medium_risk_action_waits_for_confirmation(tmp_path) -> None:
     confirmed = await orchestrator.confirm(events[-1].action_id)
     assert confirmed[-1].kind is EventKind.COMPLETED
     assert clipboard.value == "hello"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_spoken_wechat_message_waits_for_confirmation_then_sends(tmp_path) -> None:
+    sent: list[tuple[str, str]] = []
+    response = ParsedModelResponse(text="不应调用模型", confidence=0.9)
+    orchestrator, _, store, local, _ = build_orchestrator(
+        tmp_path,
+        response,
+        wechat_sender=lambda contact, message: sent.append((contact, message)) or True,
+    )
+
+    events = await orchestrator.submit("用微信给 Ghost（小号）发送 今晚八点见")
+
+    assert events[-1].kind is EventKind.CONFIRMATION_REQUIRED
+    assert "Ghost（小号）" in events[-1].message
+    assert "今晚八点见" in events[-1].message
+    assert sent == []
+    assert local.requests == []
+
+    confirmed = await orchestrator.confirm(events[-1].action_id)
+    assert confirmed[-1].kind is EventKind.COMPLETED
+    assert sent == [("Ghost（小号）", "今晚八点见")]
     store.close()
 
 

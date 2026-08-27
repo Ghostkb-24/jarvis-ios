@@ -44,10 +44,18 @@ class DraggableGlassWidget(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setStyleSheet(WINDOW_STYLE)
         self._drag_offset: QPoint | None = None
+        self._position_locked = False
+
+    @property
+    def position_locked(self) -> bool:
+        return self._position_locked
+
+    def set_position_locked(self, locked: bool) -> None:
+        self._position_locked = locked
+        self._drag_offset = None
 
     def set_always_on_top(self, enabled: bool) -> None:
         flags = self.windowFlags()
@@ -76,6 +84,9 @@ class DraggableGlassWidget(QWidget):
         super().paintEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._position_locked:
+            super().mousePressEvent(event)
+            return
         if event.button() is Qt.MouseButton.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
@@ -83,6 +94,9 @@ class DraggableGlassWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._position_locked:
+            super().mouseMoveEvent(event)
+            return
         if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()

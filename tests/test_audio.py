@@ -1,6 +1,13 @@
 import pytest
 
-from jarvis_assistant.audio import AudioError, AudioRecorder, Speaker
+from jarvis_assistant.audio import (
+    AudioBuffer,
+    AudioError,
+    AudioRecorder,
+    FasterWhisperTranscriber,
+    Speaker,
+    prepare_microphone_samples,
+)
 
 
 class FakeAudioBackend:
@@ -62,3 +69,27 @@ def test_speaker_interrupts_previous_utterance() -> None:
     speaker.say("第二句")
     assert engine.spoken == ["第一句", "第二句"]
     assert engine.stop_count == 2
+
+
+def test_prepare_microphone_samples_downsamples_and_amplifies():
+    samples = [0.01, 0.02, 0.03, -0.2, 0.05, 0.06]
+    assert prepare_microphone_samples(samples, source_rate=48_000) == [0.12, -1.0]
+
+
+def test_transcriber_does_not_discard_quiet_speech_with_vad():
+    captured = {}
+
+    class FakeSegment:
+        text = "打开微信"
+
+    class FakeModel:
+        def transcribe(self, audio, **options):
+            captured.update(options)
+            return [FakeSegment()], None
+
+    transcriber = FasterWhisperTranscriber()
+    transcriber._model = FakeModel()
+    text = transcriber.transcribe(AudioBuffer(samples=(0.001,) * 1600))
+
+    assert text == "打开微信"
+    assert captured["vad_filter"] is False

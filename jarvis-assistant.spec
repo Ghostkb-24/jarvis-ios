@@ -4,10 +4,20 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 
 hiddenimports = []
-for package in ("faster_whisper", "keyring.backends", "pynput", "pyttsx3.drivers"):
+for package in (
+    "faster_whisper",
+    "keyring.backends",
+    "pynput",
+    "pyttsx3.drivers",
+    "sherpa_onnx",
+):
     hiddenimports += collect_submodules(package)
 
-binaries = collect_dynamic_libs("ctranslate2") + collect_dynamic_libs("onnxruntime")
+binaries = (
+    collect_dynamic_libs("ctranslate2")
+    + collect_dynamic_libs("onnxruntime")
+    + collect_dynamic_libs("sherpa_onnx")
+)
 
 analysis = Analysis(
     ["src/jarvis_assistant/__main__.py"],

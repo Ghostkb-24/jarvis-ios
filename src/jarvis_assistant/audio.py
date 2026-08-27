@@ -22,6 +22,13 @@ class AudioBackend(Protocol):
     def stop(self) -> None: ...
 
 
+def prepare_microphone_samples(
+    samples: Sequence[float], *, source_rate: int, target_rate: int = 16_000, gain: float = 12.0
+) -> list[float]:
+    step = max(1, round(source_rate / target_rate))
+    return [max(-1.0, min(1.0, float(value) * gain)) for value in samples[::step]]
+
+
 class AudioRecorder:
     def __init__(self, backend: AudioBackend, *, sample_rate: int = 16_000) -> None:
         self._backend = backend
@@ -77,17 +84,31 @@ class SoundDeviceBackend:
         except ImportError as error:
             raise AudioError("尚未安装 sounddevice。") from error
 
+        stream_device = self._device
+        stream_rate = self._sample_rate
+        if isinstance(self._device, str):
+            from jarvis_assistant.wake_word import resolve_input_device
+
+            stream_device = resolve_input_device(self._device, sounddevice.query_devices())
+            stream_rate = int(sounddevice.query_devices(stream_device)["default_samplerate"])
+
         def callback(indata: Any, frames: int, time: Any, status: Any) -> None:
             del frames, time
             if status:
                 return
-            on_samples(indata[:, 0].tolist())
+            on_samples(
+                prepare_microphone_samples(
+                    indata[:, 0].tolist(),
+                    source_rate=stream_rate,
+                    target_rate=self._sample_rate,
+                )
+            )
 
         self._stream = sounddevice.InputStream(
-            samplerate=self._sample_rate,
+            samplerate=stream_rate,
             channels=1,
             dtype="float32",
-            device=self._device,
+            device=stream_device,
             callback=callback,
         )
         self._stream.start()
@@ -130,7 +151,7 @@ class FasterWhisperTranscriber:
                 raise AudioError("无法加载语音识别模型。") from error
         audio = numpy.asarray(buffer.samples, dtype=numpy.float32)
         try:
-            segments, _ = self._model.transcribe(audio, language="zh", vad_filter=True)
+            segments, _ = self._model.transcribe(audio, language="zh", vad_filter=False)
             text = "".join(segment.text for segment in segments).strip()
         except Exception as error:
             raise AudioError("语音识别失败。") from error
