@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jarvis-desktop-assistant"
+version = "0.1.0"
+description = "A secure Ollama-first Windows desktop assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "pydantic>=2.10,<3",
+  "httpx>=0.28,<1",
+  "keyring>=25.6,<26",
+  "sounddevice>=0.5,<1",
+  "faster-whisper>=1.1,<2",
+  "pyttsx3>=2.98,<3",
+  "pynput>=1.8,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.9,<1",
+  "pyinstaller>=6.11,<7",
+]
+
+[project.scripts]
+jarvis-assistant = "jarvis_assistant.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jarvis_assistant"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
