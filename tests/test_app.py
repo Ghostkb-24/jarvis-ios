@@ -1,3 +1,6 @@
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+
 from jarvis_assistant.app import build_application
 from jarvis_assistant.orchestrator import EventKind, OrchestratorEvent
 
@@ -6,6 +9,15 @@ def test_runtime_registers_expected_tray_actions(qtbot, tmp_path) -> None:
     runtime = build_application(data_dir=tmp_path, test_mode=True)
     labels = [action.text() for action in runtime.tray.contextMenu().actions()]
     assert labels == ["打开控制台", "开始说话", "暂停助手", "设置", "退出"]
+    runtime.shutdown()
+
+
+def test_runtime_uses_same_brand_icon_for_application_and_tray(qtbot, tmp_path) -> None:
+    QApplication.setWindowIcon(QIcon())
+    runtime = build_application(data_dir=tmp_path, test_mode=True)
+
+    assert not QApplication.windowIcon().isNull()
+    assert runtime.tray.icon().cacheKey() == QApplication.windowIcon().cacheKey()
     runtime.shutdown()
 
 

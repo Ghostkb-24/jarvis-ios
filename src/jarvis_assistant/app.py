@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -135,8 +136,10 @@ class ApplicationRuntime(QObject):
         self._connect_signals()
 
     def _configure_tray(self) -> None:
-        icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        self.tray.setIcon(QIcon(icon))
+        icon = QApplication.windowIcon()
+        if icon.isNull():
+            icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray.setIcon(icon)
         menu = QMenu()
         actions = (
             ("打开控制台", self.console.show),
@@ -336,6 +339,9 @@ def build_application(
     app = QApplication.instance()
     if app is None:
         raise RuntimeError("QApplication must be created before build_application")
+    brand_icon = QIcon(str(_resource_path("assets", "jarvis-kobe.ico")))
+    if not brand_icon.isNull():
+        app.setWindowIcon(brand_icon)
     base_dir = Path(data_dir) if data_dir else _default_data_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore.open(base_dir / "state.db")
@@ -387,3 +393,8 @@ def _default_data_dir() -> Path:
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
     return Path(local_app_data) / "JarvisDesktopAssistant"
+
+
+def _resource_path(*parts: str) -> Path:
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return bundle_root.joinpath(*parts)

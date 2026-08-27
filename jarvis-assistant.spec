@@ -13,7 +13,7 @@ analysis = Analysis(
     ["src/jarvis_assistant/__main__.py"],
     pathex=["src"],
     binaries=binaries,
-    datas=[],
+    datas=[("assets", "assets")],
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
@@ -40,5 +40,6 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon="assets/jarvis-kobe.ico",
     disable_windowed_traceback=False,
 )
