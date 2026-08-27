@@ -62,3 +62,9 @@ class Settings(StrictModel):
     sidebar_visible: bool = True
     microphone_name: str | None = None
     speaker_name: str | None = None
+    sidebar_x: int | None = None
+    sidebar_y: int | None = None
+    console_x: int | None = None
+    console_y: int | None = None
+    capsule_x: int | None = None
+    capsule_y: int | None = None

@@ -17,6 +17,7 @@ from jarvis_assistant.audio import (
     FasterWhisperTranscriber,
     SoundDeviceBackend,
 )
+from jarvis_assistant.domain import Settings
 from jarvis_assistant.models import OllamaProvider, OpenAIProvider, ProviderRouter
 from jarvis_assistant.orchestrator import EventKind, Orchestrator, OrchestratorEvent
 from jarvis_assistant.security import SecurityPolicy
@@ -63,6 +64,17 @@ class NoopHotkey:
         self.closed = True
 
 
+class MemoryCredentialStore:
+    def __init__(self) -> None:
+        self._key: str | None = None
+
+    def get_openai_key(self) -> str | None:
+        return self._key
+
+    def set_openai_key(self, value: str | None) -> None:
+        self._key = value or None
+
+
 class PynputHotkey:
     def __init__(self, callback: Callable[[], None]) -> None:
         try:
@@ -89,6 +101,7 @@ class ApplicationRuntime(QObject):
         self,
         *,
         store: SQLiteStore,
+        credentials: CredentialStore | MemoryCredentialStore,
         orchestrator: Orchestrator,
         local_provider: OllamaProvider,
         cloud_provider: OpenAIProvider,
@@ -99,6 +112,7 @@ class ApplicationRuntime(QObject):
     ) -> None:
         super().__init__()
         self.store = store
+        self.credentials = credentials
         self.orchestrator = orchestrator
         self.local_provider = local_provider
         self.cloud_provider = cloud_provider
@@ -143,11 +157,24 @@ class ApplicationRuntime(QObject):
         if screen is None:
             return
         area = screen.availableGeometry()
-        self.sidebar.move(area.left() + 18, area.top() + 18)
-        self.console.move(area.right() - self.console.width() - 18, area.top() + 18)
+        settings = self.store.load_settings()
+        self.sidebar.move(
+            settings.sidebar_x if settings.sidebar_x is not None else area.left() + 18,
+            settings.sidebar_y if settings.sidebar_y is not None else area.top() + 18,
+        )
+        self.console.move(
+            settings.console_x
+            if settings.console_x is not None
+            else area.right() - self.console.width() - 18,
+            settings.console_y if settings.console_y is not None else area.top() + 18,
+        )
         self.capsule.move(
-            area.center().x() - self.capsule.width() // 2,
-            area.bottom() - self.capsule.height() - 18,
+            settings.capsule_x
+            if settings.capsule_x is not None
+            else area.center().x() - self.capsule.width() // 2,
+            settings.capsule_y
+            if settings.capsule_y is not None
+            else area.bottom() - self.capsule.height() - 18,
         )
 
     def _connect_signals(self) -> None:
@@ -155,6 +182,7 @@ class ApplicationRuntime(QObject):
         self.console.request_submitted.connect(self.submit_text)
         self.console.confirmation_answered.connect(self.answer_confirmation)
         self.bridge.activated.connect(self.toggle_recording)
+        self.settings_dialog.settings_saved.connect(self.save_settings)
 
     @Slot()
     def toggle_pause(self) -> None:
@@ -251,11 +279,30 @@ class ApplicationRuntime(QObject):
         self.console.show()
         self.sidebar.set_status(message)
 
+    @Slot(dict)
+    def save_settings(self, values: dict[str, Any]) -> None:
+        current = self.store.load_settings()
+        updated = current.model_copy(
+            update={
+                "ollama_model": str(values["ollama_model"]),
+                "always_on_top": bool(values["always_on_top"]),
+                "click_through": bool(values["click_through"]),
+            }
+        )
+        updated = Settings.model_validate(updated)
+        self.store.save_settings(updated)
+        self.credentials.set_openai_key(str(values.get("openai_key") or "") or None)
+        for window in (self.sidebar, self.console, self.capsule):
+            window.set_always_on_top(updated.always_on_top)
+            window.set_click_through(updated.click_through)
+        self.sidebar.set_status("设置已保存，模型配置重启后生效。")
+
     @Slot()
     def shutdown(self) -> None:
         if self.closed:
             return
         self.closed = True
+        self._persist_window_state()
         self.hotkey.close()
         if self.recorder.recording:
             with suppress(AudioError):
@@ -266,6 +313,19 @@ class ApplicationRuntime(QObject):
         self.capsule.close()
         self.settings_dialog.close()
         self.store.close()
+
+    def _persist_window_state(self) -> None:
+        settings = self.store.load_settings().model_copy(
+            update={
+                "sidebar_x": self.sidebar.x(),
+                "sidebar_y": self.sidebar.y(),
+                "console_x": self.console.x(),
+                "console_y": self.console.y(),
+                "capsule_x": self.capsule.x(),
+                "capsule_y": self.capsule.y(),
+            }
+        )
+        self.store.save_settings(Settings.model_validate(settings))
 
 
 def build_application(
@@ -280,10 +340,12 @@ def build_application(
     base_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore.open(base_dir / "state.db")
     settings = store.load_settings()
+    credentials: CredentialStore | MemoryCredentialStore
+    credentials = MemoryCredentialStore() if test_mode else CredentialStore()
     api_key = None
     if not test_mode:
         try:
-            api_key = CredentialStore().get_openai_key()
+            api_key = credentials.get_openai_key()
         except Exception:
             api_key = None
 
@@ -306,6 +368,7 @@ def build_application(
     hotkey = NoopHotkey() if test_mode else PynputHotkey(bridge.activated.emit)
     runtime = ApplicationRuntime(
         store=store,
+        credentials=credentials,
         orchestrator=orchestrator,
         local_provider=local,
         cloud_provider=cloud,

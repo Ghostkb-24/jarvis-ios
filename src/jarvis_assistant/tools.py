@@ -150,6 +150,36 @@ class UnavailableVolume:
         raise OSError("volume adapter is not configured")
 
 
+class WindowsVolumeAdapter:
+    def __init__(self, endpoint: Any | None = None) -> None:
+        self._endpoint = endpoint
+
+    def _get_endpoint(self) -> Any:
+        if self._endpoint is not None:
+            return self._endpoint
+        try:
+            from ctypes import POINTER
+
+            from comtypes import CLSCTX_ALL, cast
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        except ImportError as error:
+            raise OSError("Windows Core Audio adapter is unavailable") from error
+        device = AudioUtilities.GetSpeakers()
+        endpoint = getattr(device, "EndpointVolume", None)
+        if endpoint is None:
+            raw_endpoint = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            endpoint = cast(raw_endpoint, POINTER(IAudioEndpointVolume))
+        self._endpoint = endpoint
+        return endpoint
+
+    def get_volume(self) -> int:
+        scalar = float(self._get_endpoint().GetMasterVolumeLevelScalar())
+        return round(scalar * 100)
+
+    def set_volume(self, percent: int) -> None:
+        self._get_endpoint().SetMasterVolumeLevelScalar(percent / 100, None)
+
+
 def default_registry(
     *,
     allowed_search_roots: Sequence[Path] = (),
@@ -162,7 +192,7 @@ def default_registry(
     registry = ToolRegistry()
     roots = tuple(path.resolve() for path in allowed_search_roots)
     clipboard_adapter = clipboard or UnavailableClipboard()
-    volume_adapter = volume or UnavailableVolume()
+    volume_adapter = volume or (WindowsVolumeAdapter() if os.name == "nt" else UnavailableVolume())
     launch_process = process_launcher or _launch_process
     launch_file = file_launcher or os.startfile
     open_browser = browser_opener or webbrowser.open

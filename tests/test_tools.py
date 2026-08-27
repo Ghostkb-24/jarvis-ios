@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from jarvis_assistant.domain import ToolProposal
-from jarvis_assistant.tools import ToolRegistry, default_registry
+from jarvis_assistant.tools import ToolRegistry, WindowsVolumeAdapter, default_registry
 
 
 class MemoryClipboard:
@@ -104,3 +104,43 @@ def test_volume_rejects_out_of_range_value() -> None:
     result = registry.execute(ToolProposal(tool_name="set_volume", arguments={"percent": 101}))
     assert not result.ok
     assert result.code == "invalid_arguments"
+
+
+class FakeEndpoint:
+    def __init__(self) -> None:
+        self.scalar = 0.42
+
+    def GetMasterVolumeLevelScalar(self) -> float:
+        return self.scalar
+
+    def SetMasterVolumeLevelScalar(self, scalar: float, context) -> None:
+        self.scalar = scalar
+
+
+def test_windows_volume_adapter_converts_percent_and_scalar() -> None:
+    endpoint = FakeEndpoint()
+    adapter = WindowsVolumeAdapter(endpoint=endpoint)
+    assert adapter.get_volume() == 42
+    adapter.set_volume(65)
+    assert endpoint.scalar == pytest.approx(0.65)
+
+
+def test_windows_volume_adapter_casts_activated_com_pointer(monkeypatch) -> None:
+    import comtypes
+    from pycaw.pycaw import AudioUtilities
+
+    endpoint = FakeEndpoint()
+    raw_pointer = object()
+
+    class FakeDevice:
+        def Activate(self, interface_id, context, activation_params):
+            return raw_pointer
+
+    monkeypatch.setattr(AudioUtilities, "GetSpeakers", staticmethod(FakeDevice))
+    monkeypatch.setattr(
+        comtypes,
+        "cast",
+        lambda pointer, interface_type: endpoint if pointer is raw_pointer else None,
+    )
+
+    assert WindowsVolumeAdapter().get_volume() == 42

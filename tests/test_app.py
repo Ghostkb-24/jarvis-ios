@@ -54,3 +54,30 @@ def test_cloud_fallback_confirmation_calls_use_cloud(qtbot, tmp_path) -> None:
     runtime.answer_confirmation("cloud-1", True)
     qtbot.waitUntil(lambda: called == ["cloud-1"])
     runtime.shutdown()
+
+
+def test_settings_save_persists_key_and_preferences(qtbot, tmp_path) -> None:
+    runtime = build_application(data_dir=tmp_path, test_mode=True)
+    runtime.settings_dialog.settings_saved.emit(
+        {
+            "ollama_model": "qwen2.5:3b",
+            "openai_key": "sk-test",
+            "always_on_top": False,
+            "click_through": False,
+        }
+    )
+    assert runtime.credentials.get_openai_key() == "sk-test"
+    assert not runtime.store.load_settings().always_on_top
+    runtime.shutdown()
+
+
+def test_window_positions_persist_across_runtime_restart(qtbot, tmp_path) -> None:
+    runtime = build_application(data_dir=tmp_path, test_mode=True)
+    runtime.sidebar.move(111, 122)
+    runtime.console.move(333, 144)
+    runtime.shutdown()
+
+    restored = build_application(data_dir=tmp_path, test_mode=True)
+    assert (restored.sidebar.x(), restored.sidebar.y()) == (111, 122)
+    assert (restored.console.x(), restored.console.y()) == (333, 144)
+    restored.shutdown()

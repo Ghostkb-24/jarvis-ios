@@ -15,8 +15,10 @@ dependencies = [
   "keyring>=25.6,<26",
   "sounddevice>=0.5,<1",
   "faster-whisper>=1.1,<2",
+  "huggingface-hub>=0.21,<1",
   "pyttsx3>=2.98,<3",
   "pynput>=1.8,<2",
+  "pycaw==20240210",
 ]
 
 [project.optional-dependencies]
