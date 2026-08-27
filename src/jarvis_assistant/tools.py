@@ -113,10 +113,14 @@ class ToolRegistry:
             for spec in self._tools.values()
         ]
 
+    def validate(self, proposal: ToolProposal) -> ToolInput:
+        spec = self.get(proposal.tool_name)
+        return spec.input_model.model_validate(proposal.arguments)
+
     def execute(self, proposal: ToolProposal) -> ToolResult:
         spec = self.get(proposal.tool_name)
         try:
-            arguments = spec.input_model.model_validate(proposal.arguments)
+            arguments = self.validate(proposal)
         except ValidationError as error:
             return ToolResult(
                 ok=False,
