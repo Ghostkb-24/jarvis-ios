@@ -20,6 +20,13 @@ analysis = Analysis(
     excludes=["tkinter"],
     noarchive=False,
 )
+# Qt 6 on Windows uses the ICU implementation shipped by the OS.  The Codex
+# runtime also puts Poppler's incompatible unversioned ICU DLLs on PATH, which
+# PyInstaller can accidentally collect and load ahead of System32.
+blocked_runtime_dlls = {"icuuc.dll", "icudt78.dll"}
+analysis.binaries = [
+    entry for entry in analysis.binaries if entry[0].lower() not in blocked_runtime_dlls
+]
 pyz = PYZ(analysis.pure)
 exe = EXE(
     pyz,

@@ -13,14 +13,25 @@ try {
     New-Item -ItemType Directory -Path $probeRoot | Out-Null
     Copy-Item -LiteralPath $source -Destination $probeExe
     $process = Start-Process -FilePath $probeExe -WorkingDirectory $probeRoot -PassThru
-    Start-Sleep -Seconds 5
-    $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+    $startupDeadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        Start-Sleep -Milliseconds 250
+        $running = Get-Process -Name "JarvisDesktopAssistant" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Path -and $_.Path.StartsWith(
+                    $probeRoot + [IO.Path]::DirectorySeparatorChar,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        $errorProcess = $running | Where-Object {
+            $_.MainWindowTitle -in @("Error", "Unhandled exception in script")
+        }
+        if ($errorProcess) {
+            throw "Standalone executable opened the PyInstaller error dialog."
+        }
+    } while ([DateTime]::UtcNow -lt $startupDeadline)
     if (-not $running) {
-        throw "Standalone executable exited during startup with code $($process.ExitCode)."
-    }
-    $running.Refresh()
-    if ($running.MainWindowTitle -eq "Error") {
-        throw "Standalone executable opened the PyInstaller error dialog."
+        throw "Standalone executable exited during startup."
     }
     Write-Output "STANDALONE STARTUP PASSED"
 }
