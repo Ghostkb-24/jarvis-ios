@@ -11,7 +11,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtensionOID, NameOID
 
-from jarvis_assistant.bridge.tls import BridgeTLSIdentity, BridgeTLSIdentityError
+from jarvis_assistant.bridge import tls as tls_module
+from jarvis_assistant.bridge.tls import (
+    BridgeTLSIdentity,
+    BridgeTLSIdentityError,
+    create_server_ssl_context,
+)
 
 
 class MemoryCredentialBackend:
@@ -227,3 +232,69 @@ def test_missing_or_corrupt_private_key_fails_closed(
         create_identity(tmp_path, backend)
 
     assert (tmp_path / "bridge-01.pem").read_bytes() == identity.certificate_pem
+
+
+def test_server_ssl_context_hardens_then_removes_temporary_private_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if TLS loads before ACL hardening or leaves a private-key copy behind."""
+    identity = create_identity(tmp_path, MemoryCredentialBackend())
+    certificate_path = tmp_path / "bridge-01.pem"
+    hardened: list[Path] = []
+    loaded_key_path: list[Path] = []
+
+    class RecordingContext:
+        def load_cert_chain(self, certfile: str, keyfile: str) -> None:
+            key_path = Path(keyfile)
+            assert Path(certfile) == certificate_path
+            assert hardened == [key_path]
+            assert key_path.exists()
+            loaded_key_path.append(key_path)
+
+    monkeypatch.setattr(
+        tls_module,
+        "_restrict_private_key_to_current_user",
+        lambda path: hardened.append(path),
+    )
+
+    context = create_server_ssl_context(
+        identity,
+        certificate_path=certificate_path,
+        temporary_directory=tmp_path,
+        context_factory=lambda _protocol: RecordingContext(),
+    )
+
+    assert isinstance(context, RecordingContext)
+    assert len(loaded_key_path) == 1
+    assert not loaded_key_path[0].exists()
+    assert not list(tmp_path.glob(".jarvis-bridge-*.key"))
+
+
+def test_server_ssl_context_removes_temporary_private_key_when_loading_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if a TLS setup exception strands a plaintext private-key file."""
+    identity = create_identity(tmp_path, MemoryCredentialBackend())
+
+    class FailingContext:
+        def load_cert_chain(self, certfile: str, keyfile: str) -> None:
+            del certfile, keyfile
+            raise RuntimeError("TLS load failed")
+
+    monkeypatch.setattr(
+        tls_module,
+        "_restrict_private_key_to_current_user",
+        lambda _path: None,
+    )
+
+    with pytest.raises(RuntimeError, match="TLS load failed"):
+        create_server_ssl_context(
+            identity,
+            certificate_path=tmp_path / "bridge-01.pem",
+            temporary_directory=tmp_path,
+            context_factory=lambda _protocol: FailingContext(),
+        )
+
+    assert not list(tmp_path.glob(".jarvis-bridge-*.key"))

@@ -7,7 +7,11 @@ from threading import Barrier
 
 import pytest
 
-from jarvis_assistant.bridge.pairing import PairingClaimError, PairingSession
+from jarvis_assistant.bridge.pairing import (
+    PairingClaimError,
+    PairingSession,
+    PairingSessionOwner,
+)
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 
@@ -148,3 +152,48 @@ def test_qr_payload_contains_connection_data_but_no_long_term_secret() -> None:
     }
     assert "secret" not in repr(session)
     assert "device_secret" not in payload
+
+
+def make_owner(clock: list[datetime]) -> PairingSessionOwner:
+    return PairingSessionOwner(
+        bridge_id="bridge-01",
+        bridge_url="https://192.168.1.20:8443",
+        certificate_sha256="ab" * 32,
+        now=lambda: clock[0],
+    )
+
+
+def test_pairing_owner_creates_one_live_session_for_initial_display() -> None:
+    """Fails if the first QR is absent or each click invalidates a live session."""
+    owner = make_owner([NOW])
+
+    first = owner.session_for_display()
+    second = owner.session_for_display()
+
+    assert second is first
+
+
+def test_pairing_owner_rotates_an_expired_session() -> None:
+    """Fails if an expired QR remains visible and unclaimable."""
+    clock = [NOW]
+    owner = make_owner(clock)
+    expired = owner.session_for_display()
+
+    clock[0] = NOW + timedelta(seconds=120)
+    rotated = owner.session_for_display()
+
+    assert rotated.session_id != expired.session_id
+    assert rotated.proof != expired.proof
+
+
+def test_pairing_owner_rotates_a_claimed_session() -> None:
+    """Fails if the next QR reuses proof after a successful claim."""
+    clock = [NOW]
+    owner = make_owner(clock)
+    claimed = owner.session_for_display()
+    owner.claim(claimed.session_id, "Alice's iPhone", claimed.proof)
+
+    rotated = owner.session_for_display()
+
+    assert rotated.session_id != claimed.session_id
+    assert rotated.proof != claimed.proof

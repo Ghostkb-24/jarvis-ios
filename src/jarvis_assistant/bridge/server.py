@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import ssl
 from collections.abc import Callable
 from threading import Lock, Thread
 from typing import Any
@@ -141,18 +142,26 @@ class BridgeServerController:
         port: int = 8443,
         ssl_certfile: str | None = None,
         ssl_keyfile: str | None = None,
+        ssl_context: ssl.SSLContext | None = None,
         server_factory: Callable[[uvicorn.Config], Any] = uvicorn.Server,
     ) -> None:
         validated_host = validate_lan_bind_address(host)
-        if not ssl_certfile or not ssl_keyfile:
-            raise ValueError("Bridge requires a TLS certificate and private key")
+        if ssl_context is None and (not ssl_certfile or not ssl_keyfile):
+            raise ValueError("Bridge requires a TLS certificate and private key or SSL context")
+        config_arguments: dict[str, Any] = {}
+        if ssl_context is not None:
+            config_arguments["ssl_context_factory"] = (
+                lambda _config, _default_factory: ssl_context
+            )
+        else:
+            config_arguments["ssl_certfile"] = ssl_certfile
+            config_arguments["ssl_keyfile"] = ssl_keyfile
         config = uvicorn.Config(
             app=app,
             host=validated_host,
             port=port,
-            ssl_certfile=ssl_certfile,
-            ssl_keyfile=ssl_keyfile,
             log_level="warning",
+            **config_arguments,
         )
         self._server = server_factory(config)
         self._thread: Thread | None = None

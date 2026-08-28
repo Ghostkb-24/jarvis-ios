@@ -11,7 +11,7 @@ import pytest
 from jarvis_assistant.bridge.auth import sign_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyConflict, IdempotencyLedger
-from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession
+from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession, PairingSessionOwner
 from jarvis_assistant.bridge.protocol import BridgeRequest, Risk, TaskState
 from jarvis_assistant.bridge.service import (
     BridgeAuthenticationError,
@@ -109,6 +109,7 @@ def make_service(
     sent_messages: list[tuple[str, str]] | None = None,
     file_launcher: Callable[[str], object] | None = None,
     pairing_session: PairingSession | None = None,
+    pairing_session_owner: PairingSessionOwner | None = None,
 ) -> tuple[BridgeService, SQLiteStore, MemoryCredentialBackend]:
     credential_backend = backend or MemoryCredentialBackend()
     store = SQLiteStore.open(database_path)
@@ -129,6 +130,7 @@ def make_service(
             ledger=IdempotencyLedger(store),
             registry=registry,
             pairing_session=pairing_session,
+            pairing_session_owner=pairing_session_owner,
             now=lambda: NOW,
         ),
         store,
@@ -138,6 +140,33 @@ def make_service(
 
 def signed(request: BridgeRequest, secret: bytes = DEVICE_SECRET) -> str:
     return sign_request(secret, request)
+
+
+def test_pairing_claim_uses_the_exact_session_currently_shown_by_owner(tmp_path: Path) -> None:
+    """Fails if the claim endpoint and QR display drift to different sessions."""
+    owner = PairingSessionOwner(
+        bridge_id="bridge-01",
+        bridge_url="https://192.168.1.20:8443",
+        certificate_sha256="ab" * 32,
+        now=lambda: NOW,
+    )
+    service, store, _backend = make_service(
+        tmp_path / "state.db",
+        pairing_session_owner=owner,
+    )
+    shown = owner.session_for_display()
+
+    try:
+        device = service.claim_pairing(
+            shown.session_id,
+            "Alice's iPhone",
+            shown.proof,
+        )
+
+        assert service.device_store.get_device(device.device_id) is not None
+        assert owner.session_for_display().session_id != shown.session_id
+    finally:
+        store.close()
 
 
 def test_submit_rejects_invalid_and_expired_signatures(tmp_path: Path) -> None:

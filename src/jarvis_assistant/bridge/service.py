@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from jarvis_assistant.bridge.auth import AuthenticationError, verify_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyLedger, TaskRecord
-from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession
+from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession, PairingSessionOwner
 from jarvis_assistant.bridge.protocol import BridgeRequest, BridgeResponse, Risk, TaskState
 from jarvis_assistant.domain import ToolProposal
 from jarvis_assistant.tools import ToolRegistry
@@ -130,6 +130,7 @@ class BridgeService:
         ledger: IdempotencyLedger,
         registry: ToolRegistry,
         pairing_session: PairingSession | None = None,
+        pairing_session_owner: PairingSessionOwner | None = None,
         chat_dispatcher: Callable[[str], Awaitable[str]] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -137,10 +138,16 @@ class BridgeService:
         self._ledger = ledger
         self._registry = registry
         self._pairing_session = pairing_session
+        self._pairing_session_owner = pairing_session_owner
         self._chat_dispatcher = chat_dispatcher
         self._now = now or (lambda: datetime.now(UTC))
 
     def claim_pairing(self, session_id: str, device_name: str, proof: str) -> PairedDevice:
+        owner = self._pairing_session_owner
+        if owner is not None:
+            device = owner.claim(session_id, device_name, proof)
+            self.device_store.save(device)
+            return device
         session = self._pairing_session
         if session is None or session.session_id != session_id:
             raise BridgeValidationError("unknown pairing session")

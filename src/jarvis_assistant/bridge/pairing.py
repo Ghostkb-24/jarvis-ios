@@ -3,9 +3,10 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -86,6 +87,11 @@ class PairingSession:
             "proof": self.proof,
         }
 
+    @property
+    def claimed(self) -> bool:
+        with self._claim_lock:
+            return self._claimed
+
     def claim(self, device_name: str, proof: str, now: datetime) -> PairedDevice:
         claimed_at = _as_utc(now)
         if not device_name.strip():
@@ -110,6 +116,47 @@ class PairingSession:
             )
             self._claimed = True
             return device
+
+
+class PairingSessionOwner:
+    def __init__(
+        self,
+        *,
+        bridge_id: str,
+        bridge_url: str,
+        certificate_sha256: str,
+        now: Callable[[], datetime] | None = None,
+        ttl: timedelta = timedelta(seconds=120),
+    ) -> None:
+        self._bridge_id = bridge_id
+        self._bridge_url = bridge_url
+        self._certificate_sha256 = certificate_sha256
+        self._now = now or (lambda: datetime.now(UTC))
+        self._ttl = ttl
+        self._session: PairingSession | None = None
+        self._lock = RLock()
+
+    def session_for_display(self) -> PairingSession:
+        with self._lock:
+            now = _as_utc(self._now())
+            session = self._session
+            if session is None or session.claimed or now >= session.expires_at:
+                session = PairingSession.create(
+                    bridge_id=self._bridge_id,
+                    bridge_url=self._bridge_url,
+                    certificate_sha256=self._certificate_sha256,
+                    now=now,
+                    ttl=self._ttl,
+                )
+                self._session = session
+            return session
+
+    def claim(self, session_id: str, device_name: str, proof: str) -> PairedDevice:
+        with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                raise PairingClaimError("unknown pairing session")
+            return session.claim(device_name, proof, self._now())
 
 
 def _as_utc(value: datetime) -> datetime:

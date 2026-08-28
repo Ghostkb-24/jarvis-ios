@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import ipaddress
 import os
+import ssl
+import subprocess
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -21,6 +25,70 @@ from jarvis_assistant.bridge.pairing import canonicalize_bridge_host, is_private
 
 class BridgeTLSIdentityError(RuntimeError):
     """Raised when an established TLS identity cannot be loaded safely."""
+
+
+def create_server_ssl_context(
+    identity: BridgeTLSIdentity,
+    *,
+    certificate_path: str | Path,
+    temporary_directory: str | Path | None = None,
+    context_factory: Callable[[int], Any] = ssl.SSLContext,
+) -> ssl.SSLContext:
+    """Load Bridge TLS material while keeping no reusable private-key file."""
+    directory = Path(temporary_directory) if temporary_directory is not None else None
+    if directory is not None:
+        directory.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".jarvis-bridge-",
+        suffix=".key",
+        dir=directory,
+    )
+    key_path = Path(temporary_name)
+    try:
+        os.chmod(key_path, 0o600)
+        with os.fdopen(descriptor, "wb") as private_key_file:
+            descriptor = -1
+            private_key_file.write(identity.private_key_pem)
+            private_key_file.flush()
+            os.fsync(private_key_file.fileno())
+        _restrict_private_key_to_current_user(key_path)
+        context = context_factory(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(certificate_path), str(key_path))
+        return context
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        key_path.unlink(missing_ok=True)
+
+
+def _restrict_private_key_to_current_user(path: Path) -> None:
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+        return
+    system_root = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
+    whoami = system_root / "System32" / "whoami.exe"
+    icacls = system_root / "System32" / "icacls.exe"
+    identity = subprocess.run(
+        [str(whoami), "/user", "/fo", "csv", "/nh"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = list(csv.reader(identity.stdout.splitlines()))
+    if len(rows) != 1 or len(rows[0]) < 2 or not rows[0][1].startswith("S-"):
+        raise BridgeTLSIdentityError("could not resolve the current Windows user SID")
+    subprocess.run(
+        [
+            str(icacls),
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"*{rows[0][1]}:(F)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @dataclass(frozen=True)

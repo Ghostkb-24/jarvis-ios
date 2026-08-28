@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -96,6 +96,12 @@ class MobileServer(Protocol):
     def stop_and_join(self, timeout: float | None = None) -> None: ...
 
 
+@dataclass(frozen=True)
+class MobileBridgeComposition:
+    controller: MobileServer
+    pairing_session_owner: Any
+
+
 class PynputHotkey:
     def __init__(self, callback: Callable[[], None]) -> None:
         try:
@@ -132,6 +138,7 @@ class ApplicationRuntime(QObject):
         transcriber: FasterWhisperTranscriber,
         wake_listener: NoopWakeWord | WakeWordListener,
         mobile_server: MobileServer | None = None,
+        pairing_session_owner: Any | None = None,
         pairing_code_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
@@ -146,7 +153,9 @@ class ApplicationRuntime(QObject):
         self.transcriber = transcriber
         self.wake_listener = wake_listener
         self.mobile_server = mobile_server
+        self.pairing_session_owner = pairing_session_owner
         self._pairing_code_callback = pairing_code_callback
+        self._pairing_dialog: Any | None = None
         self.wake_bridge = HotkeyBridge()
         self.sidebar = CompactSidebar()
         self.console = TaskConsole()
@@ -233,6 +242,21 @@ class ApplicationRuntime(QObject):
 
     @Slot()
     def show_pairing_code(self) -> None:
+        owner = self.pairing_session_owner
+        if owner is not None:
+            from jarvis_assistant.ui.pairing import PairingQrDialog
+
+            session = owner.session_for_display()
+            dialog = PairingQrDialog(session.qr_payload)
+            self._pairing_dialog = dialog
+            dialog.finished.connect(
+                lambda _result: setattr(self, "_pairing_dialog", None)
+                if self._pairing_dialog is dialog
+                else None
+            )
+            dialog.show()
+            self.sidebar.set_status("iPhone 配对码已显示。")
+            return
         if self._pairing_code_callback is None:
             self.sidebar.set_status("尚未配置手机连接。")
             return
@@ -363,11 +387,12 @@ class ApplicationRuntime(QObject):
         self,
         function: Callable[[], Any],
         on_success: Callable[[object], None],
+        on_failure: Callable[[str], None] | None = None,
     ) -> None:
         task = WorkerTask(function)
         self._tasks.add(task)
         task.signals.succeeded.connect(on_success)
-        task.signals.failed.connect(self._show_error)
+        task.signals.failed.connect(on_failure or self._show_error)
         task.signals.succeeded.connect(lambda _: self._tasks.discard(task))
         task.signals.failed.connect(lambda _: self._tasks.discard(task))
         QThreadPool.globalInstance().start(task)
@@ -415,9 +440,19 @@ class ApplicationRuntime(QObject):
         if mobile_server is not None:
             self._shutting_down = True
             mobile_server.request_stop()
-            self._run_background(mobile_server.stop_and_join, self._finish_shutdown)
+            self._run_background(
+                mobile_server.stop_and_join,
+                self._finish_shutdown,
+                self._shutdown_failed,
+            )
             return
         self._finish_shutdown(None)
+
+    def _shutdown_failed(self, message: str) -> None:
+        if self.closed:
+            return
+        self._shutting_down = False
+        self._show_error(message)
 
     def _finish_shutdown(self, _result: object) -> None:
         if self.closed:
@@ -437,6 +472,7 @@ class ApplicationRuntime(QObject):
         self.capsule.close()
         self.settings_dialog.close()
         self.store.close()
+        QApplication.quit()
 
     def _persist_window_state(self) -> None:
         settings = self.store.load_settings().model_copy(
@@ -461,6 +497,7 @@ def build_application(
     mobile_server: MobileServer | None = None,
     pairing_code_callback: Callable[[], None] | None = None,
     bridge_host: str | None = None,
+    mobile_bridge_factory: Callable[..., MobileBridgeComposition] | None = None,
 ) -> ApplicationRuntime:
     app = QApplication.instance()
     if app is None:
@@ -498,6 +535,22 @@ def build_application(
     bridge = HotkeyBridge()
     hotkey: NoopHotkey | PynputHotkey
     hotkey = NoopHotkey() if test_mode else PynputHotkey(bridge.activated.emit)
+    pairing_session_owner: Any | None = None
+    configured_host = bridge_host
+    if configured_host is None and not test_mode:
+        configured_host = os.environ.get("JARVIS_BRIDGE_BIND_ADDRESS")
+    if mobile_server is None and configured_host:
+        composition_factory = mobile_bridge_factory or _compose_mobile_bridge
+        composition = composition_factory(
+            store=store,
+            registry=registry,
+            orchestrator=orchestrator,
+            base_dir=base_dir,
+            credentials=credentials,
+            host=configured_host,
+        )
+        mobile_server = composition.controller
+        pairing_session_owner = composition.pairing_session_owner
     runtime = ApplicationRuntime(
         store=store,
         credentials=credentials,
@@ -526,26 +579,11 @@ def build_application(
             )
         ),
         mobile_server=mobile_server,
+        pairing_session_owner=pairing_session_owner,
         pairing_code_callback=pairing_code_callback,
     )
-    pairing_payload: dict[str, Any] | None = None
-    if mobile_server is None and not test_mode:
-        configured_host = bridge_host or os.environ.get("JARVIS_BRIDGE_BIND_ADDRESS")
-        if configured_host:
-            mobile_server, pairing_payload = _compose_mobile_bridge(
-                store=store,
-                registry=registry,
-                orchestrator=orchestrator,
-                base_dir=base_dir,
-                credentials=credentials,
-                host=configured_host,
-            )
     if mobile_server is not None:
         mobile_server.start()
-    if pairing_payload is not None:
-        runtime._pairing_code_callback = lambda: runtime.sidebar.set_status(
-            json.dumps(pairing_payload, ensure_ascii=False, sort_keys=True)
-        )
     if not test_mode:
         runtime._resume_wake()
     if settings.sidebar_visible:
@@ -556,14 +594,15 @@ def build_application(
 def _compose_mobile_bridge(
     *, store: SQLiteStore, registry: Any, orchestrator: Orchestrator, base_dir: Path,
     credentials: CredentialStore, host: str,
-) -> tuple[MobileServer, dict[str, Any]]:
+    controller_factory: Callable[..., MobileServer] | None = None,
+) -> MobileBridgeComposition:
     """Compose the production LAN Bridge only for an explicitly selected address."""
     from jarvis_assistant.bridge.device_store import DeviceStore
     from jarvis_assistant.bridge.idempotency import IdempotencyLedger
-    from jarvis_assistant.bridge.pairing import PairingSession
+    from jarvis_assistant.bridge.pairing import PairingSessionOwner
     from jarvis_assistant.bridge.server import BridgeServerController, create_bridge_app
     from jarvis_assistant.bridge.service import BridgeService
-    from jarvis_assistant.bridge.tls import BridgeTLSIdentity
+    from jarvis_assistant.bridge.tls import BridgeTLSIdentity, create_server_ssl_context
 
     identity = BridgeTLSIdentity.load_or_create(
         certificate_path=base_dir / "bridge-cert.pem",
@@ -571,20 +610,30 @@ def _compose_mobile_bridge(
         bridge_id="jarvis-desktop",
         hosts=(host,),
     )
-    key_path = base_dir / "bridge-key.pem"
-    key_path.write_bytes(identity.private_key_pem)
-    with suppress(OSError):
-        os.chmod(key_path, 0o600)
-    session = PairingSession.create(
-        bridge_id="jarvis-desktop", bridge_url=f"https://{host}:8443",
+    ssl_context = create_server_ssl_context(
+        identity,
+        certificate_path=base_dir / "bridge-cert.pem",
+        temporary_directory=base_dir,
+    )
+    pairing_owner = PairingSessionOwner(
+        bridge_id="jarvis-desktop",
+        bridge_url=f"https://{host}:8443",
         certificate_sha256=identity.certificate_sha256,
     )
     service = BridgeService(device_store=DeviceStore(store, credentials._backend),
-        ledger=IdempotencyLedger(store), registry=registry, pairing_session=session,
+        ledger=IdempotencyLedger(store), registry=registry,
+        pairing_session_owner=pairing_owner,
         chat_dispatcher=lambda text: _dispatch_orchestrator_chat(orchestrator, text))
-    controller = BridgeServerController(create_bridge_app(service), host=host,
-        ssl_certfile=str(base_dir / "bridge-cert.pem"), ssl_keyfile=str(key_path))
-    return controller, session.qr_payload
+    controller_type = controller_factory or BridgeServerController
+    controller = controller_type(
+        create_bridge_app(service),
+        host=host,
+        ssl_context=ssl_context,
+    )
+    return MobileBridgeComposition(
+        controller=controller,
+        pairing_session_owner=pairing_owner,
+    )
 
 
 async def _dispatch_orchestrator_chat(orchestrator: Orchestrator, text: str) -> str:

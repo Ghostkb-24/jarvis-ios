@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -217,3 +218,29 @@ def test_server_controller_requires_tls_material() -> None:
     """Fails if a LAN Bridge can accidentally expose signed requests over HTTP."""
     with pytest.raises(ValueError, match="TLS certificate and private key"):
         BridgeServerController(object(), host="192.168.1.20")
+
+
+def test_server_controller_uses_preloaded_ssl_context_without_private_key_path() -> None:
+    """Fails if Uvicorn receives a reusable plaintext private-key filename."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    configs = []
+
+    class FakeServer:
+        should_exit = False
+
+        def run(self) -> None:
+            return
+
+    controller = BridgeServerController(
+        object(),
+        host="192.168.1.20",
+        ssl_context=context,
+        server_factory=lambda config: (configs.append(config) or FakeServer()),
+    )
+
+    controller.start()
+    controller.stop_and_join(timeout=2)
+
+    assert len(configs) == 1
+    assert configs[0].ssl_keyfile is None
+    assert configs[0].ssl_context_factory(configs[0], lambda: None) is context

@@ -1,8 +1,14 @@
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from jarvis_assistant.app import _dispatch_orchestrator_chat, build_application
+from jarvis_assistant.app import (
+    MobileBridgeComposition,
+    _compose_mobile_bridge,
+    _dispatch_orchestrator_chat,
+    build_application,
+)
 from jarvis_assistant.domain import ToolProposal
 from jarvis_assistant.orchestrator import EventKind, OrchestratorEvent
 
@@ -123,6 +129,279 @@ def test_mobile_server_stops_and_joins_before_sqlite_closes(qtbot, tmp_path) -> 
     assert events == ["start", "stop_requested", "server_stopped", "sqlite_closed"]
 
 
+def test_production_composition_runtime_owns_started_controller_until_shutdown(
+    qtbot,
+    tmp_path,
+) -> None:
+    """Fails if production loses the exact controller or pairing-session owner it starts."""
+    events: list[str] = []
+    pairing_owner = object()
+
+    class RecordingMobileServer:
+        def start(self) -> None:
+            events.append("start")
+
+        def request_stop(self) -> None:
+            events.append("stop_requested")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+            events.append("server_stopped")
+
+    controller = RecordingMobileServer()
+
+    def compose_mobile_bridge(**_kwargs) -> MobileBridgeComposition:
+        events.append("compose")
+        return MobileBridgeComposition(
+            controller=controller,
+            pairing_session_owner=pairing_owner,
+        )
+
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        bridge_host="192.168.1.20",
+        mobile_bridge_factory=compose_mobile_bridge,
+    )
+    close_store = runtime.store.close
+
+    def record_close() -> None:
+        events.append("sqlite_closed")
+        close_store()
+
+    runtime.store.close = record_close
+
+    assert runtime.mobile_server is controller
+    assert runtime.pairing_session_owner is pairing_owner
+    assert events == ["compose", "start"]
+
+    runtime.shutdown()
+    qtbot.waitUntil(lambda: runtime.closed)
+
+    assert events == [
+        "compose",
+        "start",
+        "stop_requested",
+        "server_stopped",
+        "sqlite_closed",
+    ]
+
+
+def test_production_composition_leaves_no_private_key_file(tmp_path) -> None:
+    """Fails if production keeps an ordinary bridge-key.pem after TLS is loaded."""
+    from jarvis_assistant.storage import SQLiteStore
+    from jarvis_assistant.tools import default_registry
+
+    class MemoryBackend:
+        def __init__(self) -> None:
+            self.passwords: dict[tuple[str, str], str] = {}
+
+        def get_password(self, service: str, username: str) -> str | None:
+            return self.passwords.get((service, username))
+
+        def set_password(self, service: str, username: str, value: str) -> None:
+            self.passwords[(service, username)] = value
+
+        def delete_password(self, service: str, username: str) -> None:
+            self.passwords.pop((service, username), None)
+
+    class Credentials:
+        _backend = MemoryBackend()
+
+    class MemoryVolume:
+        def get_volume(self) -> int:
+            return 20
+
+        def set_volume(self, percent: int) -> None:
+            del percent
+
+    store = SQLiteStore.open(tmp_path / "state.db")
+    try:
+        composition = _compose_mobile_bridge(
+            store=store,
+            registry=default_registry(volume=MemoryVolume()),
+            orchestrator=object(),
+            base_dir=tmp_path,
+            credentials=Credentials(),
+            host="192.168.1.20",
+        )
+
+        assert composition.controller is not None
+        assert not (tmp_path / "bridge-key.pem").exists()
+        assert not list(tmp_path.glob(".jarvis-bridge-*.key"))
+    finally:
+        store.close()
+
+
+def bridge_factory_with_controller(controller_factory):
+    class MemoryBackend:
+        def __init__(self) -> None:
+            self.passwords: dict[tuple[str, str], str] = {}
+
+        def get_password(self, service: str, username: str) -> str | None:
+            return self.passwords.get((service, username))
+
+        def set_password(self, service: str, username: str, value: str) -> None:
+            self.passwords[(service, username)] = value
+
+        def delete_password(self, service: str, username: str) -> None:
+            self.passwords.pop((service, username), None)
+
+    class Credentials:
+        _backend = MemoryBackend()
+
+    def compose(**kwargs):
+        kwargs["credentials"] = Credentials()
+        return _compose_mobile_bridge(
+            **kwargs,
+            controller_factory=controller_factory,
+        )
+
+    return compose
+
+
+def test_tls_private_key_is_absent_when_controller_start_fails(qtbot, tmp_path) -> None:
+    """Fails if a server-start exception can strand an ordinary private-key file."""
+    class StartFailureController:
+        def __init__(self, _app, *, host, ssl_context) -> None:
+            assert host == "192.168.1.20"
+            assert ssl_context is not None
+
+        def start(self) -> None:
+            assert not list(tmp_path.glob("*bridge*.key"))
+            assert not (tmp_path / "bridge-key.pem").exists()
+            raise RuntimeError("start failed")
+
+        def request_stop(self) -> None:
+            return
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        build_application(
+            data_dir=tmp_path,
+            test_mode=True,
+            bridge_host="192.168.1.20",
+            mobile_bridge_factory=bridge_factory_with_controller(StartFailureController),
+        )
+
+    assert not list(tmp_path.glob("*bridge*.key"))
+    assert not (tmp_path / "bridge-key.pem").exists()
+
+
+def test_tls_private_key_is_absent_during_tray_stop(qtbot, tmp_path) -> None:
+    """Fails if stopping a composed controller leaves reusable key material on disk."""
+    events: list[str] = []
+
+    class RecordingController:
+        def __init__(self, _app, *, host, ssl_context) -> None:
+            assert host == "192.168.1.20"
+            assert ssl_context is not None
+
+        def start(self) -> None:
+            events.append("start")
+            assert not list(tmp_path.glob("*bridge*.key"))
+
+        def request_stop(self) -> None:
+            events.append("stop_requested")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+            assert not list(tmp_path.glob("*bridge*.key"))
+            events.append("stopped")
+
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        bridge_host="192.168.1.20",
+        mobile_bridge_factory=bridge_factory_with_controller(RecordingController),
+    )
+    runtime.stop_mobile_connection()
+    qtbot.waitUntil(lambda: runtime.mobile_server is None)
+
+    assert events == ["start", "stopped"]
+    assert not list(tmp_path.glob("*bridge*.key"))
+    runtime.shutdown()
+
+
+def test_tls_private_key_is_absent_during_application_shutdown(qtbot, tmp_path) -> None:
+    """Fails if shutdown cleanup depends on retaining a plaintext private-key file."""
+    events: list[str] = []
+
+    class RecordingController:
+        def __init__(self, _app, *, host, ssl_context) -> None:
+            assert host == "192.168.1.20"
+            assert ssl_context is not None
+
+        def start(self) -> None:
+            events.append("start")
+            assert not list(tmp_path.glob("*bridge*.key"))
+
+        def request_stop(self) -> None:
+            events.append("stop_requested")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+            assert not list(tmp_path.glob("*bridge*.key"))
+            events.append("stopped")
+
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        bridge_host="192.168.1.20",
+        mobile_bridge_factory=bridge_factory_with_controller(RecordingController),
+    )
+    runtime.shutdown()
+    qtbot.waitUntil(lambda: runtime.closed)
+
+    assert events == ["start", "stop_requested", "stopped"]
+    assert not list(tmp_path.glob("*bridge*.key"))
+
+
+def test_pairing_action_shows_scannable_qr_without_plaintext_proof_leakage(
+    qtbot,
+    tmp_path,
+    caplog,
+) -> None:
+    """Fails if pairing proof appears as text/status/log/audit instead of only in a QR."""
+    from PySide6.QtWidgets import QLabel
+
+    from jarvis_assistant.bridge.pairing import PairingSessionOwner
+    from jarvis_assistant.ui.pairing import PairingQrDialog
+
+    owner = PairingSessionOwner(
+        bridge_id="bridge-01",
+        bridge_url="https://192.168.1.20:8443",
+        certificate_sha256="ab" * 32,
+    )
+    runtime = build_application(data_dir=tmp_path, test_mode=True)
+    runtime.pairing_session_owner = owner
+
+    runtime.show_pairing_code()
+
+    session = owner.session_for_display()
+    dialog = runtime._pairing_dialog
+    assert isinstance(dialog, PairingQrDialog)
+    qtbot.addWidget(dialog)
+    pixmap = dialog.qr_label.pixmap()
+    assert pixmap is not None and not pixmap.isNull()
+    assert pixmap.width() >= 240 and pixmap.height() >= 240
+    visible_text = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    assert session.proof not in visible_text
+    assert session.proof not in runtime.sidebar.result_label.text()
+    assert session.proof not in caplog.text
+    assert all(
+        session.proof not in event.arguments_summary
+        and session.proof not in event.result_summary
+        for event in runtime.store.list_audit()
+    )
+
+    dialog.close()
+    assert owner.session_for_display() is session
+    runtime.shutdown()
+
+
 def test_stop_mobile_connection_runs_off_qt_thread(qtbot, tmp_path) -> None:
     """Fails if the tray action blocks the UI while joining the Uvicorn thread."""
     calls: list[str] = []
@@ -201,6 +480,69 @@ def test_shutdown_waits_for_an_inflight_mobile_stop_before_closing_sqlite(
     qtbot.waitUntil(lambda: runtime.closed)
 
     assert events.index("server_stopped") < events.index("sqlite_closed")
+
+
+def test_shutdown_timeout_is_retryable_and_quits_only_after_sqlite_close(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Fails if a join timeout wedges shutdown, closes DB, or quits prematurely."""
+    events: list[str] = []
+    join_attempts = 0
+
+    class RetryingMobileServer:
+        def start(self) -> None:
+            events.append("start")
+
+        def request_stop(self) -> None:
+            events.append("stop_requested")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            nonlocal join_attempts
+            del timeout
+            join_attempts += 1
+            if join_attempts == 1:
+                raise TimeoutError("join timed out")
+            events.append("server_stopped")
+
+    server = RetryingMobileServer()
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        mobile_server=server,
+    )
+    close_store = runtime.store.close
+
+    def record_close() -> None:
+        events.append("sqlite_closed")
+        close_store()
+
+    runtime.store.close = record_close
+    monkeypatch.setattr(QApplication, "quit", lambda: events.append("quit"))
+
+    try:
+        runtime.shutdown()
+
+        assert not runtime.closed
+        assert runtime.mobile_server is server
+        qtbot.waitUntil(lambda: not runtime._shutting_down)
+
+        assert "join timed out" in runtime.sidebar.result_label.text()
+        assert runtime.store.load_settings() is not None
+        assert "sqlite_closed" not in events
+        assert "quit" not in events
+
+        runtime.shutdown()
+        qtbot.waitUntil(lambda: runtime.closed)
+
+        assert join_attempts == 2
+        assert runtime.mobile_server is None
+        assert events[-3:] == ["server_stopped", "sqlite_closed", "quit"]
+    finally:
+        if not runtime.closed:
+            runtime.mobile_server = None
+            runtime._finish_shutdown(None)
 
 
 def test_cloud_fallback_confirmation_calls_use_cloud(qtbot, tmp_path) -> None:
