@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import NameOID
 
 from jarvis_assistant.bridge.device_store import CredentialBackend
-from jarvis_assistant.bridge.pairing import is_private_bridge_host
+from jarvis_assistant.bridge.pairing import canonicalize_bridge_host, is_private_bridge_host
 
 
 class BridgeTLSIdentityError(RuntimeError):
@@ -42,9 +42,10 @@ class BridgeTLSIdentity:
         hosts: Iterable[str] = ("localhost",),
     ) -> BridgeTLSIdentity:
         path = Path(certificate_path)
-        requested_hosts = tuple(hosts)
-        if not requested_hosts or any(not is_private_bridge_host(host) for host in requested_hosts):
+        supplied_hosts = tuple(hosts)
+        if not supplied_hosts or any(not is_private_bridge_host(host) for host in supplied_hosts):
             raise BridgeTLSIdentityError("TLS identity hosts must be private or local")
+        requested_hosts = tuple(canonicalize_bridge_host(host) for host in supplied_hosts)
         stored_key = credential_backend.get_password(cls.CREDENTIAL_SERVICE, bridge_id)
         certificate_exists = path.exists()
 
@@ -206,7 +207,8 @@ def _verify_requested_hosts(certificate: x509.Certificate, hosts: Iterable[str])
 
 
 def _normalized_host_key(host: str) -> tuple[str, str]:
+    canonical_host = canonicalize_bridge_host(host)
     try:
-        return ("ip", str(ipaddress.ip_address(host)))
+        return ("ip", str(ipaddress.ip_address(canonical_host)))
     except ValueError:
-        return ("dns", host.rstrip(".").casefold())
+        return ("dns", canonical_host)

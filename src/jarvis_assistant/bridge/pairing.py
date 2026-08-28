@@ -62,7 +62,7 @@ class PairingSession:
         created_at = _as_utc(now or datetime.now(UTC))
         if ttl <= timedelta(0):
             raise ValueError("pairing TTL must be positive")
-        _validate_bridge_url(bridge_url)
+        bridge_url = _validate_bridge_url(bridge_url)
         if not _is_lowercase_sha256(certificate_sha256):
             raise ValueError("certificate fingerprint must be 64 lowercase hexadecimal characters")
         return cls(
@@ -119,21 +119,40 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def is_private_bridge_host(host: str) -> bool:
+    normalized = canonicalize_bridge_host(host)
     try:
-        address = ipaddress.ip_address(host)
+        address = ipaddress.ip_address(normalized)
     except ValueError:
-        normalized = host.rstrip(".").casefold()
+        if _is_legacy_numeric_host(normalized):
+            return False
         return bool(normalized) and (
             normalized == "localhost" or normalized.endswith(".local") or "." not in normalized
         )
     return any(address in network for network in _PRIVATE_NETWORKS)
 
 
-def _validate_bridge_url(value: str) -> None:
+def canonicalize_bridge_host(host: str) -> str:
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return host.rstrip(".").casefold()
+
+
+def _is_legacy_numeric_host(host: str) -> bool:
+    if host.isdecimal():
+        return True
+    return (
+        host.startswith("0x")
+        and len(host) > 2
+        and all(character in "0123456789abcdef" for character in host[2:])
+    )
+
+
+def _validate_bridge_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
         host = parsed.hostname
-        _ = parsed.port
+        port = parsed.port
     except ValueError as error:
         raise ValueError("bridge URL must be a private HTTPS URL") from error
     if (
@@ -144,6 +163,10 @@ def _validate_bridge_url(value: str) -> None:
         or not is_private_bridge_host(host)
     ):
         raise ValueError("bridge URL must be a private HTTPS URL")
+    canonical_host = canonicalize_bridge_host(host)
+    url_host = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
+    netloc = f"{url_host}:{port}" if port is not None else url_host
+    return parsed._replace(netloc=netloc).geturl()
 
 
 def _is_lowercase_sha256(value: object) -> bool:

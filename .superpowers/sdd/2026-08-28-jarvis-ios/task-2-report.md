@@ -381,3 +381,150 @@ All checks passed!
 - The previously documented cross-system transaction limitation remains: a
   credential backend failure cannot be made atomically transactional with
   SQLite. Exceptions roll back SQLite, and subsequent reads still fail closed.
+
+## Fix round 2 — legacy IPv4 encodings and trailing-dot canonicalization
+
+### Implementation
+
+- Hardened the shared private-host classifier against legacy IPv4 encodings.
+  Dotless all-decimal hosts and `0x`-prefixed hexadecimal hosts are rejected
+  before the LAN hostname fallback, covering forms such as `134744072` and
+  `0x08080808` that legacy resolvers interpret as public `8.8.8.8`.
+- Added one shared host canonicalizer for pairing and TLS. IP literals use the
+  canonical `ipaddress` representation; DNS names are lowercase without a
+  trailing root dot.
+- Pairing now stores and advertises the canonical host in its HTTPS QR URL.
+- TLS canonicalizes supplied hosts before certificate SAN construction and uses
+  that same representation for established-certificate comparison. Creating and
+  reloading an identity requested as `bridge.local.` therefore stores
+  `bridge.local` in the SAN and preserves the certificate fingerprint.
+
+### RED / GREEN evidence
+
+#### Legacy numeric public IPv4 encodings
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_pairing.py::test_create_rejects_non_https_or_non_private_bridge_url tests\bridge\test_tls.py::test_creation_rejects_public_certificate_host -q
+```
+
+RED output:
+
+```text
+..FF...FF.                                                               [100%]
+4 failed, 6 passed in 0.40s
+```
+
+The four failures were the URL and TLS cases for `134744072` and
+`0x08080808`. GREEN after rejecting legacy numeric syntax:
+
+```text
+..........                                                               [100%]
+10 passed in 0.19s
+```
+
+#### Stable trailing-dot TLS identity
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_tls.py::test_trailing_dot_host_is_canonicalized_and_reloads_stably -q
+```
+
+RED output:
+
+```text
+F                                                                        [100%]
+AssertionError: assert 'bridge.local' in ['localhost', 'bridge.local.']
+1 failed in 0.32s
+```
+
+GREEN after canonicalizing before SAN construction and comparison:
+
+```text
+.                                                                        [100%]
+1 passed in 0.27s
+```
+
+#### Pairing URL/certificate host consistency
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_pairing.py::test_create_canonicalizes_trailing_dot_bridge_url -q
+```
+
+RED output:
+
+```text
+F                                                                        [100%]
+AssertionError: assert 'https://bridge.local.:8443' == 'https://bridge.local:8443'
+1 failed in 0.26s
+```
+
+GREEN command covering both advertised URL and stable TLS reload:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_pairing.py::test_create_canonicalizes_trailing_dot_bridge_url tests\bridge\test_tls.py::test_trailing_dot_host_is_canonicalized_and_reloads_stably -q
+```
+
+```text
+..                                                                       [100%]
+2 passed in 0.31s
+```
+
+### Final verification
+
+Focused Bridge tests:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge -q
+```
+
+```text
+.......................................................                  [100%]
+55 passed in 1.02s
+```
+
+One full Python suite run:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest -q
+```
+
+```text
+........................................................................ [ 61%]
+.............................................                            [100%]
+117 passed in 12.46s
+```
+
+Ruff:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m ruff check src tests
+```
+
+```text
+All checks passed!
+```
+
+### Files changed in fix round 2
+
+- `src/jarvis_assistant/bridge/pairing.py`
+- `src/jarvis_assistant/bridge/tls.py`
+- `tests/bridge/test_pairing.py`
+- `tests/bridge/test_tls.py`
+- `.superpowers/sdd/2026-08-28-jarvis-ios/task-2-report.md`
+
+### Self-review and concerns
+
+- Decimal-only detection also rejects leading-zero decimal/octal-looking
+  dotless forms; the hexadecimal rule is case-insensitive after canonicalization.
+  Non-canonical dotted numeric forms remain rejected by the existing dotted
+  public-host rule.
+- Host canonicalization occurs before both QR serialization and X.509 SAN
+  construction, preventing future representation drift between connection and
+  pinning data.
+- LAN DNS classification remains syntactic; no DNS lookup, listener, or public
+  discovery behavior was introduced.

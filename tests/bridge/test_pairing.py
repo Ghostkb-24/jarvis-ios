@@ -26,6 +26,8 @@ def make_session() -> PairingSession:
     [
         "http://192.168.1.20:8443",
         "https://8.8.8.8:8443",
+        "https://134744072:8443",
+        "https://0x08080808:8443",
         "https://example.com:8443",
         "https://user:password@192.168.1.20:8443",
     ],
@@ -49,6 +51,18 @@ def test_create_rejects_malformed_certificate_fingerprint(fingerprint: str) -> N
             certificate_sha256=fingerprint,
             now=NOW,
         )
+
+
+def test_create_canonicalizes_trailing_dot_bridge_url() -> None:
+    session = PairingSession.create(
+        bridge_id="bridge-01",
+        bridge_url="https://bridge.local.:8443",
+        certificate_sha256="ab" * 32,
+        now=NOW,
+    )
+
+    assert session.bridge_url == "https://bridge.local:8443"
+    assert session.qr_payload["bridge_url"] == "https://bridge.local:8443"
 
 
 def test_claim_succeeds_only_once() -> None:

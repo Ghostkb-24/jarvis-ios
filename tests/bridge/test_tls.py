@@ -60,7 +60,7 @@ def test_first_creation_makes_self_signed_private_host_identity(tmp_path: Path) 
     assert "BEGIN PRIVATE KEY" in private_key
 
 
-@pytest.mark.parametrize("host", ["8.8.8.8", "example.com"])
+@pytest.mark.parametrize("host", ["8.8.8.8", "134744072", "0x08080808", "example.com"])
 def test_creation_rejects_public_certificate_host(tmp_path: Path, host: str) -> None:
     with pytest.raises(BridgeTLSIdentityError, match="private"):
         BridgeTLSIdentity.load_or_create(
@@ -82,6 +82,31 @@ def test_reload_rejects_requested_host_missing_from_certificate_sans(tmp_path: P
             bridge_id="bridge-01",
             hosts=("192.168.1.21",),
         )
+
+
+def test_trailing_dot_host_is_canonicalized_and_reloads_stably(tmp_path: Path) -> None:
+    backend = MemoryCredentialBackend()
+    certificate_path = tmp_path / "bridge.pem"
+
+    first = BridgeTLSIdentity.load_or_create(
+        certificate_path=certificate_path,
+        credential_backend=backend,
+        bridge_id="bridge-01",
+        hosts=("bridge.local.",),
+    )
+    certificate = x509.load_pem_x509_certificate(first.certificate_pem)
+    alternative_names = certificate.extensions.get_extension_for_oid(
+        ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+    ).value
+
+    assert "bridge.local" in alternative_names.get_values_for_type(x509.DNSName)
+    second = BridgeTLSIdentity.load_or_create(
+        certificate_path=certificate_path,
+        credential_backend=backend,
+        bridge_id="bridge-01",
+        hosts=("bridge.local.",),
+    )
+    assert second.certificate_sha256 == first.certificate_sha256
 
 
 def test_reload_preserves_certificate_fingerprint_and_private_key(tmp_path: Path) -> None:
