@@ -13,6 +13,9 @@ Implementation commit:
 Static-review corrective commit:
 `6aad81b` (`fix: harden Swift bridge wire protocol`).
 
+Second static-review corrective commit:
+`5592781` (`fix: register pinned redirect delegate`).
+
 ## Files
 
 - `ios/Package.swift`
@@ -60,7 +63,9 @@ created, and the SDD ledger was not changed.
   lowercase fingerprint; mismatch, missing/malformed trust, and every other
   authentication method are cancelled. Its task-delegate redirect callback
   cancels every HTTP redirect, including 307/308, before a POST body can be
-  replayed to a different URL.
+  replayed to a different URL. The delegate explicitly conforms to
+  `URLSessionTaskDelegate`, so the callback is registered with the actual
+  `URLSession` task-delegate dispatch path rather than only callable directly.
 - `BridgeRequest`, `BridgeResponse`, `PairingPayload`, and `PairClaimResponse`
   compare decoded top-level keys to their exact wire schemas and reject extras.
   Recursive `payload` dictionaries remain deliberately open for protocol
@@ -90,7 +95,7 @@ production files were added. The local RED command could not start because the
 host has no Swift executable; therefore executable RED/GREEN evidence is
 deferred together with the final Swift gate rather than fabricated.
 
-There are 32 Swift test methods:
+There are 33 Swift test methods:
 
 - 11 model tests: Python canonical fixture parity including nested `1.0`,
   decimals, exponents, and negative zero; nested ordering; slash, control,
@@ -99,7 +104,7 @@ There are 32 Swift test methods:
   deliberately open nested payloads; and redacted request descriptions.
 - 4 signing tests: Python HMAC fixture parity for the original and numeric
   payloads, exact 32-byte secret enforcement, and lowercase 64-hex validation.
-- 17 core tests: Keychain add/read/update/delete/accessibility and validation;
+- 18 core tests: Keychain add/read/update/delete/accessibility and validation;
   certificate pin match/mismatch/no-trust/unexpected-auth; HTTPS private/local
   URL validation including public IPv6 and legacy numeric hosts; all 307/308
   HTTP/public-IP/different-host redirects for state-changing POST bodies;
@@ -108,6 +113,11 @@ There are 32 Swift test methods:
   safe status retry; pinned pairing and persistence ordering; malformed and
   unknown-field pairing responses; confirmation/cancellation owner, target,
   and path binding.
+- The redirect suite includes a compile-time assignment to
+  `any URLSessionTaskDelegate` and a registered `URLSession` plus custom
+  `URLProtocol` integration. For every 307/308 redirect to HTTP, a public IP,
+  or a different host, it asserts that exactly the original POST request is
+  observed and the Location is not followed.
 
 ## Local commands and results
 
@@ -130,6 +140,10 @@ All commands ran from
 | `py -3.12 -m ruff check src tests` (static-review correction) | `All checks passed!`. |
 | `git diff --check` and `git diff --cached --check` before `6aad81b` | Passed with no whitespace errors. |
 | Static source check after correction | Legacy `SignedBridgeRequest`/encoder envelope code absent; redirect-rejection hook and four strict top-level-model checks present. |
+| `cd ios; swift test` (second static-review correction) | Could not start: `swift` is not recognized on this Windows host. No Swift compilation or test pass result is claimed. |
+| `$env:PYTHONPATH='src'; py -3.12 -m pytest -q --basetemp=<task4-round2-temp>` | `184 passed in 12.82s`. |
+| `py -3.12 -m ruff check src tests` (second static-review correction) | `All checks passed!`. |
+| Round-2 static source/test check | Explicit `URLSessionTaskDelegate` conformance, `URLProtocol` registration, and single-request redirect assertion present; 33 Swift test methods. |
 
 These checks prove repository hygiene and Python non-regression only. They do
 not prove that Swift compiles or that the Swift tests pass.
