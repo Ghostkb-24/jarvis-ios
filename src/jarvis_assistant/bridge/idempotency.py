@@ -4,7 +4,6 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from threading import RLock
 from typing import Any
 
 from jarvis_assistant.bridge.protocol import BridgeRequest, BridgeResponse, Risk, TaskState
@@ -40,7 +39,9 @@ class TaskRecord:
 class IdempotencyLedger:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
-        self._lock = RLock()
+        self._lock = store.lock
+        self._sensitive_arguments: dict[str, dict[str, Any]] = {}
+        self._sensitive_payloads: dict[str, dict[str, Any]] = {}
         with self._lock:
             self._store.connection.executescript(
                 """
@@ -61,6 +62,7 @@ class IdempotencyLedger:
                 """
             )
             self._store.connection.commit()
+            self._recover_interrupted_tasks()
 
     def reserve(
         self,
@@ -91,6 +93,14 @@ class IdempotencyLedger:
                     return record, False
 
                 timestamp = datetime.now(UTC).isoformat()
+                sensitive = tool_name == "send_wechat_message"
+                stored_arguments = self._redact_sensitive(arguments) if sensitive else arguments
+                stored_payload = (
+                    self._redact_sensitive(response_payload) if sensitive else response_payload
+                )
+                if sensitive:
+                    self._sensitive_arguments[request.request_id] = arguments
+                    self._sensitive_payloads[request.request_id] = response_payload
                 connection.execute(
                     "insert into bridge_tasks("
                     "request_id, idempotency_key, device_id, request_digest, tool_name, "
@@ -102,10 +112,10 @@ class IdempotencyLedger:
                         request.device_id,
                         digest,
                         tool_name,
-                        self._dump(arguments),
+                        self._dump(stored_arguments),
                         state.value,
                         risk.value,
-                        self._dump(response_payload),
+                        self._dump(stored_payload),
                         timestamp,
                         timestamp,
                     ),
@@ -195,6 +205,8 @@ class IdempotencyLedger:
                 ),
             )
             self._store.connection.commit()
+            self._sensitive_arguments.pop(request_id, None)
+            self._sensitive_payloads.pop(request_id, None)
             record = self.get(request_id)
             if record is None:
                 raise KeyError(request_id)
@@ -234,7 +246,12 @@ class IdempotencyLedger:
                     assert row is not None
                     record = self._record(row)
                 connection.commit()
-                return record
+                self._sensitive_arguments.pop(request_id, None)
+                self._sensitive_payloads.pop(request_id, None)
+                refreshed = self.get(request_id)
+                if refreshed is None:
+                    raise KeyError(request_id)
+                return refreshed
             except Exception:
                 connection.rollback()
                 raise
@@ -252,17 +269,50 @@ class IdempotencyLedger:
     def _dump(value: dict[str, Any]) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+    def _recover_interrupted_tasks(self) -> None:
+        self._store.connection.execute(
+            "update bridge_tasks set state = ?, response_payload_json = ?, result_summary = ?, "
+            "updated_at = ? where state = ?",
+            (
+                TaskState.RESULT_UNKNOWN.value,
+                self._dump({"summary": "执行结果未知，请勿自动重试。"}),
+                "执行结果未知。",
+                datetime.now(UTC).isoformat(),
+                TaskState.EXECUTING.value,
+            ),
+        )
+        self._store.connection.commit()
+
     @staticmethod
-    def _record(row: Any) -> TaskRecord:
+    def _redact_sensitive(value: dict[str, Any]) -> dict[str, Any]:
+        def redact(item: Any, key: str = "") -> Any:
+            if key in {"contact", "message"}:
+                return "[REDACTED]"
+            if isinstance(item, dict):
+                return {str(name): redact(child, str(name)) for name, child in item.items()}
+            if isinstance(item, list):
+                return [redact(child) for child in item]
+            return item
+
+        return redact(value)
+
+    def _record(self, row: Any) -> TaskRecord:
+        request_id = row["request_id"]
+        arguments = json.loads(row["arguments_json"])
+        payload = json.loads(row["response_payload_json"])
+        if request_id in self._sensitive_arguments:
+            arguments = self._sensitive_arguments[request_id]
+        if request_id in self._sensitive_payloads:
+            payload = self._sensitive_payloads[request_id]
         return TaskRecord(
-            request_id=row["request_id"],
+            request_id=request_id,
             idempotency_key=row["idempotency_key"],
             device_id=row["device_id"],
             request_digest=row["request_digest"],
             tool_name=row["tool_name"],
-            arguments=json.loads(row["arguments_json"]),
+            arguments=arguments,
             state=TaskState(row["state"]),
             risk=Risk(row["risk"]),
-            response_payload=json.loads(row["response_payload_json"]),
+            response_payload=payload,
             result_summary=row["result_summary"],
         )

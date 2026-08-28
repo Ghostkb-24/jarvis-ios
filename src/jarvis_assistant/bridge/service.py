@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ class BridgeValidationError(ValueError):
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class _ToolPayload(_StrictModel):
@@ -39,6 +39,18 @@ class _ToolPayload(_StrictModel):
 
 class _TargetPayload(_StrictModel):
     target_request_id: str = Field(min_length=1)
+
+
+class _ChatPayload(_StrictModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("chat text must not be blank")
+        return normalized
 
 
 class _OpenApplicationArguments(_StrictModel):
@@ -70,6 +82,11 @@ class _SearchFilesArguments(_StrictModel):
             raise ValueError("query must not be blank")
         return normalized
 
+    @field_validator("root", mode="before")
+    @classmethod
+    def parse_json_path(cls, value: object) -> object:
+        return Path(value) if isinstance(value, str) else value
+
 
 class _OpenFileArguments(_StrictModel):
     path: Path
@@ -79,7 +96,7 @@ class _OpenFileArguments(_StrictModel):
     def reject_blank_path(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             raise ValueError("path must not be blank")
-        return value
+        return Path(value) if isinstance(value, str) else value
 
 
 class _WechatArguments(_StrictModel):
@@ -113,12 +130,14 @@ class BridgeService:
         ledger: IdempotencyLedger,
         registry: ToolRegistry,
         pairing_session: PairingSession | None = None,
+        chat_dispatcher: Callable[[str], Awaitable[str]] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.device_store = device_store
         self._ledger = ledger
         self._registry = registry
         self._pairing_session = pairing_session
+        self._chat_dispatcher = chat_dispatcher
         self._now = now or (lambda: datetime.now(UTC))
 
     def claim_pairing(self, session_id: str, device_name: str, proof: str) -> PairedDevice:
@@ -170,6 +189,53 @@ class BridgeService:
         if not created or state is TaskState.AWAITING_CONFIRMATION:
             return record.response()
         return self._execute_once(record).response()
+
+    async def submit_async(self, request: BridgeRequest, signature: str) -> BridgeResponse:
+        if request.kind == "tool":
+            return self.submit(request, signature)
+        self.authenticate(request, signature)
+        if request.kind != "chat":
+            raise BridgeValidationError("only chat and tool requests are accepted")
+        try:
+            text = _ChatPayload.model_validate(request.payload).text
+        except ValidationError as error:
+            raise BridgeValidationError("invalid chat payload") from error
+        record, created = self._ledger.reserve(
+            request,
+            tool_name="chat",
+            arguments={},
+            state=TaskState.PREPARING,
+            risk=Risk.LOW,
+            response_payload={"summary": "正在处理。"},
+        )
+        if not created:
+            return record.response()
+        dispatcher = self._chat_dispatcher
+        if dispatcher is None:
+            return self._ledger.finish(
+                request.request_id,
+                state=TaskState.FAILED,
+                response_payload={"summary": "本地对话服务不可用。"},
+                result_summary="本地对话服务不可用。",
+            ).response()
+        executing, acquired = self._ledger.begin_execution(request.request_id)
+        if not acquired:
+            return executing.response()
+        try:
+            summary = await dispatcher(text)
+        except Exception:
+            return self._ledger.finish(
+                request.request_id,
+                state=TaskState.RESULT_UNKNOWN,
+                response_payload={"summary": "执行结果未知，请勿自动重试。"},
+                result_summary="执行结果未知。",
+            ).response()
+        return self._ledger.finish(
+            request.request_id,
+            state=TaskState.COMPLETED,
+            response_payload={"summary": summary},
+            result_summary=summary,
+        ).response()
 
     def get_authenticated_task(
         self,

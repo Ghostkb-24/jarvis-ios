@@ -62,7 +62,7 @@ def create_bridge_app(service: BridgeService) -> FastAPI:
     @app.post("/v1/requests", response_model=BridgeResponse)
     async def submit_request(envelope: SignedBridgeRequest) -> JSONResponse:
         try:
-            response = service.submit(envelope.request, envelope.signature)
+            response = await service.submit_async(envelope.request, envelope.signature)
         except Exception as error:
             _raise_http_error(error)
         response_status = (

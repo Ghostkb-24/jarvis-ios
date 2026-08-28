@@ -35,52 +35,47 @@ class DeviceStore:
         self._credentials = credential_backend
 
     def save(self, device: PairedDevice) -> None:
-        connection = self._store.connection
-        connection.execute("begin immediate")
-        try:
-            existing = connection.execute(
-                "select revoked from paired_devices where device_id = ?",
-                (device.device_id,),
-            ).fetchone()
-            if existing is not None and bool(existing["revoked"]):
-                self._delete_credential_if_present(device.device_id)
-                connection.commit()
-                return
-
-            if device.revoked:
-                self._delete_credential_if_present(device.device_id)
-            else:
-                encoded_secret = base64.urlsafe_b64encode(device.secret).decode("ascii")
-                self._credentials.set_password(
-                    self.CREDENTIAL_SERVICE,
-                    device.device_id,
-                    encoded_secret,
+        with self._store.lock:
+            connection = self._store.connection
+            connection.execute("begin immediate")
+            try:
+                existing = connection.execute(
+                    "select revoked from paired_devices where device_id = ?",
+                    (device.device_id,),
+                ).fetchone()
+                if existing is not None and bool(existing["revoked"]):
+                    self._delete_credential_if_present(device.device_id)
+                    connection.commit()
+                    return
+                if device.revoked:
+                    self._delete_credential_if_present(device.device_id)
+                else:
+                    self._credentials.set_password(
+                        self.CREDENTIAL_SERVICE,
+                        device.device_id,
+                        base64.urlsafe_b64encode(device.secret).decode("ascii"),
+                    )
+                connection.execute(
+                    "insert into paired_devices(device_id, display_name, created_at, last_seen_at, "
+                    "revoked) values (?, ?, ?, ?, ?) on conflict(device_id) do update set "
+                    "display_name = excluded.display_name, created_at = excluded.created_at, "
+                    "last_seen_at = excluded.last_seen_at, "
+                    "revoked = max(paired_devices.revoked, excluded.revoked)",
+                    (device.device_id, device.display_name, device.created_at.isoformat(),
+                     device.last_seen_at.isoformat(), int(device.revoked)),
                 )
-            connection.execute(
-                "insert into paired_devices(device_id, display_name, created_at, last_seen_at, "
-                "revoked) values (?, ?, ?, ?, ?) "
-                "on conflict(device_id) do update set display_name = excluded.display_name, "
-                "created_at = excluded.created_at, last_seen_at = excluded.last_seen_at, "
-                "revoked = max(paired_devices.revoked, excluded.revoked)",
-                (
-                    device.device_id,
-                    device.display_name,
-                    device.created_at.isoformat(),
-                    device.last_seen_at.isoformat(),
-                    int(device.revoked),
-                ),
-            )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def get_device(self, device_id: str) -> StoredDevice | None:
-        row = self._store.connection.execute(
-            "select device_id, display_name, created_at, last_seen_at, revoked "
-            "from paired_devices where device_id = ?",
-            (device_id,),
-        ).fetchone()
+        with self._store.lock:
+            row = self._store.connection.execute(
+                "select device_id, display_name, created_at, last_seen_at, revoked "
+                "from paired_devices where device_id = ?",
+                (device_id,),
+            ).fetchone()
         if row is None:
             return None
         return StoredDevice(
@@ -108,18 +103,19 @@ class DeviceStore:
         return secret if len(secret) == 32 else None
 
     def revoke(self, device_id: str) -> None:
-        connection = self._store.connection
-        connection.execute("begin immediate")
-        try:
-            connection.execute(
-                "update paired_devices set revoked = 1 where device_id = ?",
-                (device_id,),
-            )
-            self._delete_credential_if_present(device_id)
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+        with self._store.lock:
+            connection = self._store.connection
+            connection.execute("begin immediate")
+            try:
+                connection.execute(
+                    "update paired_devices set revoked = 1 where device_id = ?",
+                    (device_id,),
+                )
+                self._delete_credential_if_present(device_id)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def _delete_credential_if_present(self, device_id: str) -> None:
         if self._credentials.get_password(self.CREDENTIAL_SERVICE, device_id) is not None:

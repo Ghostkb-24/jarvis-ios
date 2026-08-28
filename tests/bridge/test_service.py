@@ -12,7 +12,7 @@ from jarvis_assistant.bridge.auth import sign_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyConflict, IdempotencyLedger
 from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession
-from jarvis_assistant.bridge.protocol import BridgeRequest, TaskState
+from jarvis_assistant.bridge.protocol import BridgeRequest, Risk, TaskState
 from jarvis_assistant.bridge.service import (
     BridgeAuthenticationError,
     BridgeAuthorizationError,
@@ -233,6 +233,28 @@ def test_duplicate_survives_service_restart(tmp_path: Path) -> None:
     assert second_volume.set_values == []
 
 
+def test_restart_marks_interrupted_execution_result_unknown(tmp_path: Path) -> None:
+    """Fails if a crash leaves a task perpetually executing and eligible for a retry."""
+    database_path = tmp_path / "state.db"
+    service, store, _ = make_service(database_path)
+    request = bridge_request()
+    record, _ = service._ledger.reserve(
+        request,
+        tool_name="set_volume",
+        arguments={"percent": 35},
+        state=TaskState.PREPARING,
+        risk=Risk.LOW,
+        response_payload={"tool": "set_volume", "arguments": {"percent": 35}},
+    )
+    service._ledger.begin_execution(record.request_id)
+    store.close()
+
+    restarted, _, _ = make_service(database_path)
+
+    recovered = restarted.get_task(request.request_id, request.device_id)
+    assert recovered.state is TaskState.RESULT_UNKNOWN
+
+
 def test_idempotency_key_cannot_be_reused_for_different_request(tmp_path: Path) -> None:
     """Fails if one idempotency key aliases distinct signed operations."""
     service, _, _ = make_service(tmp_path / "state.db")
@@ -293,6 +315,39 @@ def test_bridge_strictly_validates_remote_arguments(
 
     with pytest.raises(BridgeValidationError, match="arguments"):
         service.submit(request, signed(request))
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"percent": "35"}, {"percent": True}, {"percent": 35.0}],
+)
+def test_bridge_rejects_coerced_volume_values(tmp_path: Path, arguments: dict) -> None:
+    """Fails if Pydantic turns JSON strings, booleans, or floats into a volume integer."""
+    service, _, _ = make_service(tmp_path / "state.db")
+    request = bridge_request(payload={"tool": "set_volume", "arguments": arguments})
+
+    with pytest.raises(BridgeValidationError, match="arguments"):
+        service.submit(request, signed(request))
+
+
+def test_wechat_contact_and_message_never_reach_bridge_task_sqlite(tmp_path: Path) -> None:
+    """Fails if an awaiting WeChat task stores executable message plaintext."""
+    service, store, _ = make_service(tmp_path / "state.db")
+    request = bridge_request(
+        payload={
+            "tool": "send_wechat_message",
+            "arguments": {"contact": "Alice secret", "message": "meet at eight"},
+        }
+    )
+
+    service.submit(request, signed(request))
+    rows = store.connection.execute(
+        "select arguments_json, response_payload_json from bridge_tasks"
+    ).fetchall()
+    serialized = " ".join(" ".join(row) for row in rows)
+
+    assert "Alice secret" not in serialized
+    assert "meet at eight" not in serialized
 
 
 def test_wechat_waits_for_owner_confirmation_and_replay_executes_once(tmp_path: Path) -> None:
@@ -420,6 +475,31 @@ def test_bridge_never_opens_a_file_without_configured_allowed_roots(tmp_path: Pa
 
     assert response.state is TaskState.FAILED
     assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_chat_request_dispatches_once_and_persists_response(tmp_path: Path) -> None:
+    """Fails if authenticated chat is rejected or a duplicate invokes the model twice."""
+    calls: list[str] = []
+
+    async def chat(text: str) -> str:
+        calls.append(text)
+        return "本地回答"
+
+    service, _, _ = make_service(tmp_path / "state.db")
+    service._chat_dispatcher = chat
+    request = bridge_request(
+        kind="chat",
+        payload={"text": "你好"},
+    )
+
+    first = await service.submit_async(request, signed(request))
+    second = await service.submit_async(request, signed(request))
+
+    assert first.state is TaskState.COMPLETED
+    assert first.payload == {"summary": "本地回答"}
+    assert second == first
+    assert calls == ["你好"]
 
 
 @pytest.fixture

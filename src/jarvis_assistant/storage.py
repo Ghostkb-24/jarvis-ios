@@ -6,6 +6,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -28,12 +29,15 @@ class SQLiteStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
         self.connection.row_factory = sqlite3.Row
+        self.lock = RLock()
 
     @classmethod
     def open(cls, path: str | Path) -> SQLiteStore:
         database_path = Path(path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
         store = cls(sqlite3.connect(database_path, check_same_thread=False))
+        store.connection.execute("pragma journal_mode = wal")
+        store.connection.execute("pragma busy_timeout = 5000")
         store._migrate()
         return store
 
@@ -71,19 +75,21 @@ class SQLiteStore:
         self.connection.commit()
 
     def load_settings(self) -> Settings:
-        row = self.connection.execute("select payload from settings where id = 1").fetchone()
+        with self.lock:
+            row = self.connection.execute("select payload from settings where id = 1").fetchone()
         if row is None:
             return Settings()
         return Settings.model_validate_json(row["payload"])
 
     def save_settings(self, settings: Settings) -> None:
         payload = settings.model_dump_json(exclude_unset=True)
-        self.connection.execute(
-            "insert into settings(id, payload) values(1, ?) "
-            "on conflict(id) do update set payload = excluded.payload",
-            (payload,),
-        )
-        self.connection.commit()
+        with self.lock:
+            self.connection.execute(
+                "insert into settings(id, payload) values(1, ?) "
+                "on conflict(id) do update set payload = excluded.payload",
+                (payload,),
+            )
+            self.connection.commit()
 
     def record_audit(
         self,
@@ -94,7 +100,8 @@ class SQLiteStore:
     ) -> None:
         safe_arguments = redact_value(arguments)
         safe_result = str(redact_value(result_summary))
-        self.connection.execute(
+        with self.lock:
+            self.connection.execute(
             "insert into audit_events(created_at, tool_name, arguments_summary, ok, "
             "result_summary) values (?, ?, ?, ?, ?)",
             (
@@ -104,19 +111,21 @@ class SQLiteStore:
                 int(ok),
                 safe_result,
             ),
-        )
-        self.connection.commit()
+            )
+            self.connection.commit()
 
     def list_audit(self, limit: int = 100) -> list[AuditEvent]:
-        rows = self.connection.execute(
-            "select id, created_at, tool_name, arguments_summary, ok, result_summary "
-            "from audit_events order by id desc limit ?",
-            (max(0, limit),),
-        ).fetchall()
+        with self.lock:
+            rows = self.connection.execute(
+                "select id, created_at, tool_name, arguments_summary, ok, result_summary "
+                "from audit_events order by id desc limit ?",
+                (max(0, limit),),
+            ).fetchall()
         return [AuditEvent(**dict(row)) for row in rows]
 
     def close(self) -> None:
-        self.connection.close()
+        with self.lock:
+            self.connection.close()
 
 
 _SECRET_KEY_PARTS = ("key", "token", "secret", "password")
