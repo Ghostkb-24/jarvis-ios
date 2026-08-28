@@ -4,12 +4,17 @@
 
 Task 5 is **implementation-ready / cloud-validation-pending**. The approved
 A-layout source, deterministic UI-test fixtures, and five required UI tests are
-implemented. This Windows host has neither XcodeGen nor Xcode, so no local Swift
-compile, simulator run, or UI-test pass is claimed.
+implemented. Static-review round 1 also adds six AppModel unit tests and the
+state/ownership controls they specify. This Windows host has neither XcodeGen
+nor Xcode, so no local Swift compile, simulator run, or test pass is claimed.
 
 Implementation commit:
 `8bd7fc8f134c5035b60c2e561a09b4581ea32602`
 (`feat: build Jarvis iPhone conversation UI`).
+
+Static-review round-1 fix commit:
+`a28e8d104a85c77e8434125de9611aa40ae50845`
+(`fix: serialize Jarvis iOS operations`).
 
 ## Files
 
@@ -22,6 +27,7 @@ Implementation commit:
 - `ios/JarvisIOS/Tasks/TaskListView.swift`
 - `ios/JarvisIOS/Devices/DeviceView.swift`
 - `ios/JarvisIOS/Confirmation/ActionPreviewSheet.swift`
+- `ios/JarvisIOSTests/AppModelTests.swift`
 - `ios/JarvisIOSUITests/ConversationUITests.swift`
 
 No Task 6–8 voice, intent, widget, CI, cloud-build, or integration files were
@@ -43,6 +49,20 @@ created. The SDD progress ledger was not changed.
   The production seam accepts Task 4 requests and responses, while
   `-ui-testing -fixture <name>` creates deterministic in-process state without
   touching URLSession, Keychain, or a LAN Bridge.
+- `Phase.allowsTransition(to:)` is the single explicit transition policy after
+  initialization. Each async Bridge submission owns a monotonically increasing
+  operation generation; success, result-unknown, and error continuations check
+  that ownership before changing phase, notice, or messages. Disconnecting
+  invalidates the active generation so delayed replies cannot overwrite a new
+  operation.
+- Public `submit(text:)` sends a Task 4 `.chat` request through the injected
+  Bridge, and the composer delegates to it. Public
+  `submit(proposal:)` accepts a typed `RemoteToolProposal`, creates a Task 4
+  `.tool` request, applies the Bridge's real `awaiting_confirmation` payload,
+  and lets the existing preview issue exactly one `.confirm` request.
+- Thinking, awaiting-confirmation, and executing states reject competing text
+  and voice starts in the model. The corresponding UI controls are also
+  disabled while those phases are active.
 - A pending external message displays the recipient and complete message in an
   interactive-dismiss-disabled preview. Allow creates one Task 4 confirmation
   request. Cancel only dismisses locally, changes the visible notice to
@@ -72,6 +92,20 @@ The five UI tests cover:
    count remaining zero.
 5. Result-unknown title and the no-duplicate-send warning.
 
+For static-review round 1, `AppModelTests.swift` and its controllable injected
+Bridge actor were written before the production changes. The attempted RED and
+GREEN commands both stopped before compilation because this host cannot start
+XcodeGen or Xcode. The six cloud-pending unit tests cover:
+
+1. Public text submission emits a real Task 4 `.chat` request and only applies
+   the Bridge response.
+2. An older success arriving after a newer completion is ignored.
+3. A stale timeout/error cannot replace a newer completion.
+4. Text submission and voice start are rejected while confirmation executes.
+5. A typed WeChat proposal emits `.tool`, applies an awaiting-confirmation
+   preview, and emits `.confirm` with the original target request ID.
+6. Cancelling a tool preview returns to idle without calling Bridge confirm.
+
 ## Local commands and results
 
 All commands ran from
@@ -92,6 +126,12 @@ All commands ran from
 | `cd ios; xcodegen generate` after implementation | Exit 1: `xcodegen` is not recognized on this host. |
 | Task 5 `xcodebuild test` command after implementation | Exit 1: `xcodebuild` is not recognized on this host. |
 | `git show --check --oneline --stat 8bd7fc8f134c5035b60c2e561a09b4581ea32602` | Passed; the source commit renders with no whitespace errors. |
+| Static-review round-1 YAML, exact-path, centralized-phase-mutation, generation-owner, request-kind, safety, and test-inventory checks | Passed: 4 changed source/config paths, 6 AppModel unit tests, and the original 5 UI tests. |
+| `$env:PYTHONPATH='src'; py -3.12 -m pytest -q --basetemp='.task5-review1-final-temp'` | Round 1: `184 passed in 12.81s`. |
+| `py -3.12 -m ruff check src tests` | Round 1: `All checks passed!`. |
+| `cd ios; xcodegen generate` after round-1 implementation | Exit 1: `xcodegen` is not recognized on this host. |
+| Full Task 5 `xcodebuild test` after round-1 implementation | Exit 1: `xcodebuild` is not recognized on this host. |
+| `git show --check --oneline --stat a28e8d104a85c77e8434125de9611aa40ae50845` | Passed; the review-fix commit renders with no whitespace errors. |
 
 The Python, YAML, source-inventory, and Git checks prove repository hygiene and
 desktop non-regression only. They do not prove that the Swift source compiles or
@@ -112,5 +152,6 @@ xcodebuild test \
 ```
 
 The gate closes only when XcodeGen accepts `project.yml`, both Swift package
-products resolve, the app compiles under Swift 6, and all five UI tests pass.
-Until that evidence is recorded, Task 5 remains cloud-validation-pending.
+products resolve, the app compiles under Swift 6, and all six AppModel unit
+tests plus all five UI tests pass. Until that evidence is recorded, Task 5
+remains cloud-validation-pending.
