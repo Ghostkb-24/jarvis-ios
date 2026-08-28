@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import NameOID
 
 from jarvis_assistant.bridge.device_store import CredentialBackend
+from jarvis_assistant.bridge.pairing import is_private_bridge_host
 
 
 class BridgeTLSIdentityError(RuntimeError):
@@ -41,11 +42,14 @@ class BridgeTLSIdentity:
         hosts: Iterable[str] = ("localhost",),
     ) -> BridgeTLSIdentity:
         path = Path(certificate_path)
+        requested_hosts = tuple(hosts)
+        if not requested_hosts or any(not is_private_bridge_host(host) for host in requested_hosts):
+            raise BridgeTLSIdentityError("TLS identity hosts must be private or local")
         stored_key = credential_backend.get_password(cls.CREDENTIAL_SERVICE, bridge_id)
         certificate_exists = path.exists()
 
         if not certificate_exists and stored_key is None:
-            return cls._create(path, credential_backend, bridge_id, hosts)
+            return cls._create(path, credential_backend, bridge_id, requested_hosts)
         if not certificate_exists:
             raise BridgeTLSIdentityError("TLS certificate is missing for established identity")
         if stored_key is None:
@@ -75,6 +79,7 @@ class BridgeTLSIdentity:
         if certificate_public_bytes != private_public_bytes:
             raise BridgeTLSIdentityError("TLS private key does not match certificate")
         cls._verify_self_signed(certificate)
+        _verify_requested_hosts(certificate, requested_hosts)
         return cls._from_material(certificate, certificate_pem, private_key_pem)
 
     @classmethod
@@ -178,3 +183,30 @@ def _write_public_certificate(path: Path, certificate_pem: bytes) -> None:
     finally:
         if temporary_path is not None:
             Path(temporary_path).unlink(missing_ok=True)
+
+
+def _verify_requested_hosts(certificate: x509.Certificate, hosts: Iterable[str]) -> None:
+    try:
+        alternative_names = certificate.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
+    except x509.ExtensionNotFound as error:
+        raise BridgeTLSIdentityError("TLS certificate SAN extension is missing") from error
+    certificate_hosts = {
+        ("dns", name.casefold())
+        for name in alternative_names.get_values_for_type(x509.DNSName)
+    }
+    certificate_hosts.update(
+        ("ip", str(address))
+        for address in alternative_names.get_values_for_type(x509.IPAddress)
+    )
+    requested_hosts = {_normalized_host_key(host) for host in hosts}
+    if not requested_hosts.issubset(certificate_hosts):
+        raise BridgeTLSIdentityError("TLS certificate SAN does not cover requested hosts")
+
+
+def _normalized_host_key(host: str) -> tuple[str, str]:
+    try:
+        return ("ip", str(ipaddress.ip_address(host)))
+    except ValueError:
+        return ("dns", host.rstrip(".").casefold())

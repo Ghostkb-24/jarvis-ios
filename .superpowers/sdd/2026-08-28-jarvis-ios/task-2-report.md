@@ -203,3 +203,181 @@ All checks passed!
   and any partial established TLS state fails closed on the next load rather
   than rotating the pinned identity. Device secret lookup likewise fails closed
   if either metadata or its credential is missing.
+
+## Fix round 1 — concurrency, monotonic revocation, LAN validation, credential length
+
+### Implementation
+
+- Made pairing claim consumption atomic with a per-session lock. Proof and
+  expiry validation remain outside the critical section, while the claimed
+  check, device ID/secret generation, and claimed-state transition are performed
+  together. A deterministic two-thread test synchronizes both valid proof
+  comparisons before the transition and proves exactly one claim succeeds.
+- Made device revocation monotonic. `save` and `revoke` use `BEGIN IMMEDIATE` so
+  concurrent stores serialize metadata inspection, credential mutation, and the
+  SQLite state transition. A stale save observing a revoked row preserves it,
+  performs no credential write, and removes any unexpectedly remaining
+  credential.
+- Restricted pairing URLs to HTTPS URLs without embedded credentials whose host
+  is loopback, link-local, RFC1918/ULA private address space, localhost, `.local`,
+  or a single-label LAN hostname. Certificate fingerprints must be exactly 64
+  lowercase hexadecimal characters.
+- Restricted requested TLS SAN hosts to the same private/local host classes and
+  verify on reload that every requested host exists in the established public
+  certificate SAN extension. Missing coverage fails closed without rotation.
+- Device credentials now decode only when Base64 is valid and the decoded secret
+  is exactly 32 bytes.
+
+### RED / GREEN evidence
+
+#### Atomic one-time claim
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_pairing.py::test_simultaneous_claims_allow_exactly_one_success -q
+```
+
+RED output:
+
+```text
+F                                                                        [100%]
+AssertionError: assert 2 == 1
+1 failed in 0.21s
+```
+
+GREEN output after locking the state transition:
+
+```text
+.                                                                        [100%]
+1 passed in 0.13s
+```
+
+#### Monotonic revocation
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_device_store.py::test_stale_save_cannot_reactivate_revoked_device -q
+```
+
+RED output:
+
+```text
+F                                                                        [100%]
+assert False is True
+1 failed in 0.29s
+```
+
+GREEN output after transactional stale-save protection:
+
+```text
+.                                                                        [100%]
+1 passed in 0.17s
+```
+
+#### Private URL, fingerprint, and SAN consistency
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_pairing.py::test_create_rejects_non_https_or_non_private_bridge_url tests\bridge\test_pairing.py::test_create_rejects_malformed_certificate_fingerprint tests\bridge\test_tls.py::test_creation_rejects_public_certificate_host tests\bridge\test_tls.py::test_reload_rejects_requested_host_missing_from_certificate_sans -q
+```
+
+RED output:
+
+```text
+FFFFFFFFFF                                                               [100%]
+10 failed in 0.52s
+```
+
+GREEN output after constructor and reload validation:
+
+```text
+..........                                                               [100%]
+10 passed in 0.29s
+```
+
+#### Credential decoding and exact length
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_device_store.py::test_get_secret_returns_none_for_invalid_base64_credential tests\bridge\test_device_store.py::test_get_secret_returns_none_for_wrong_length_credential -q
+```
+
+RED output (invalid Base64 was already fail-closed; both valid wrong-length cases
+exposed the missing boundary):
+
+```text
+.FF                                                                      [100%]
+2 failed, 1 passed in 0.44s
+```
+
+GREEN output after the exact 32-byte requirement:
+
+```text
+...                                                                      [100%]
+3 passed in 0.24s
+```
+
+### Final verification
+
+Focused Bridge tests, rerun after the final import-only lint correction:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge -q
+```
+
+```text
+.................................................                        [100%]
+49 passed in 0.87s
+```
+
+One full Python test run for the fix round:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest -q
+```
+
+```text
+........................................................................ [ 64%]
+.......................................                                  [100%]
+111 passed in 11.69s
+```
+
+Ruff initially reported one import-block spacing issue. After that mechanical
+correction, the fresh command and output were:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m ruff check src tests
+```
+
+```text
+All checks passed!
+```
+
+### Files changed in fix round 1
+
+- `src/jarvis_assistant/bridge/pairing.py`
+- `src/jarvis_assistant/bridge/device_store.py`
+- `src/jarvis_assistant/bridge/tls.py`
+- `tests/bridge/test_pairing.py`
+- `tests/bridge/test_device_store.py`
+- `tests/bridge/test_tls.py`
+- `.superpowers/sdd/2026-08-28-jarvis-ios/task-2-report.md`
+
+### Self-review and concerns
+
+- The concurrent-claim test widens the original race deterministically at the
+  proof-comparison boundary without adding production test hooks.
+- SQLite `BEGIN IMMEDIATE` provides cross-connection ordering for save/revoke;
+  credential operations occur while the write reservation is held so the final
+  operation determines whether the credential exists.
+- LAN DNS classification is necessarily syntactic at this layer. `.local` and
+  single-label names are allowed for same-Wi-Fi use, while dotted public DNS
+  names and public IP ranges are rejected. No DNS resolution, discovery, or
+  listener behavior was added.
+- The previously documented cross-system transaction limitation remains: a
+  credential backend failure cannot be made atomically transactional with
+  SQLite. Exceptions roll back SQLite, and subsequent reads still fail closed.

@@ -60,6 +60,30 @@ def test_first_creation_makes_self_signed_private_host_identity(tmp_path: Path) 
     assert "BEGIN PRIVATE KEY" in private_key
 
 
+@pytest.mark.parametrize("host", ["8.8.8.8", "example.com"])
+def test_creation_rejects_public_certificate_host(tmp_path: Path, host: str) -> None:
+    with pytest.raises(BridgeTLSIdentityError, match="private"):
+        BridgeTLSIdentity.load_or_create(
+            certificate_path=tmp_path / "bridge.pem",
+            credential_backend=MemoryCredentialBackend(),
+            bridge_id="bridge-01",
+            hosts=(host,),
+        )
+
+
+def test_reload_rejects_requested_host_missing_from_certificate_sans(tmp_path: Path) -> None:
+    backend = MemoryCredentialBackend()
+    create_identity(tmp_path, backend)
+
+    with pytest.raises(BridgeTLSIdentityError, match="SAN"):
+        BridgeTLSIdentity.load_or_create(
+            certificate_path=tmp_path / "bridge-01.pem",
+            credential_backend=backend,
+            bridge_id="bridge-01",
+            hosts=("192.168.1.21",),
+        )
+
+
 def test_reload_preserves_certificate_fingerprint_and_private_key(tmp_path: Path) -> None:
     backend = MemoryCredentialBackend()
     first = create_identity(tmp_path, backend)

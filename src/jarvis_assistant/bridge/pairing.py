@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Any
+from urllib.parse import urlsplit
+
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "10.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
 
 
 class PairingClaimError(ValueError):
@@ -30,6 +47,7 @@ class PairingSession:
     expires_at: datetime
     proof: str = field(repr=False)
     _claimed: bool = field(default=False, init=False, repr=False)
+    _claim_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     @classmethod
     def create(
@@ -44,6 +62,9 @@ class PairingSession:
         created_at = _as_utc(now or datetime.now(UTC))
         if ttl <= timedelta(0):
             raise ValueError("pairing TTL must be positive")
+        _validate_bridge_url(bridge_url)
+        if not _is_lowercase_sha256(certificate_sha256):
+            raise ValueError("certificate fingerprint must be 64 lowercase hexadecimal characters")
         return cls(
             bridge_id=bridge_id,
             bridge_url=bridge_url,
@@ -69,8 +90,6 @@ class PairingSession:
         claimed_at = _as_utc(now)
         if not device_name.strip():
             raise PairingClaimError("device name must not be blank")
-        if self._claimed:
-            raise PairingClaimError("pairing session already claimed")
         if claimed_at >= self.expires_at:
             raise PairingClaimError("pairing session expired")
         if not isinstance(proof, str) or not hmac.compare_digest(
@@ -78,18 +97,59 @@ class PairingSession:
         ):
             raise PairingClaimError("invalid proof")
 
-        self._claimed = True
-        return PairedDevice(
-            device_id=secrets.token_urlsafe(32),
-            display_name=device_name.strip(),
-            created_at=claimed_at,
-            last_seen_at=claimed_at,
-            revoked=False,
-            secret=secrets.token_bytes(32),
-        )
+        with self._claim_lock:
+            if self._claimed:
+                raise PairingClaimError("pairing session already claimed")
+            device = PairedDevice(
+                device_id=secrets.token_urlsafe(32),
+                display_name=device_name.strip(),
+                created_at=claimed_at,
+                last_seen_at=claimed_at,
+                revoked=False,
+                secret=secrets.token_bytes(32),
+            )
+            self._claimed = True
+            return device
 
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("datetime must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def is_private_bridge_host(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        normalized = host.rstrip(".").casefold()
+        return bool(normalized) and (
+            normalized == "localhost" or normalized.endswith(".local") or "." not in normalized
+        )
+    return any(address in network for network in _PRIVATE_NETWORKS)
+
+
+def _validate_bridge_url(value: str) -> None:
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("bridge URL must be a private HTTPS URL") from error
+    if (
+        parsed.scheme.casefold() != "https"
+        or host is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or not is_private_bridge_host(host)
+    ):
+        raise ValueError("bridge URL must be a private HTTPS URL")
+
+
+def _is_lowercase_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value.isascii()
+        and all(character in "0123456789abcdef" for character in value)
+    )

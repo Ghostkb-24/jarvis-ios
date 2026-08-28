@@ -4,6 +4,8 @@ import base64
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.pairing import PairedDevice
 from jarvis_assistant.storage import SQLiteStore
@@ -12,11 +14,13 @@ from jarvis_assistant.storage import SQLiteStore
 class MemoryCredentialBackend:
     def __init__(self) -> None:
         self.passwords: dict[tuple[str, str], str] = {}
+        self.set_calls: list[tuple[str, str]] = []
 
     def get_password(self, service: str, username: str) -> str | None:
         return self.passwords.get((service, username))
 
     def set_password(self, service: str, username: str, value: str) -> None:
+        self.set_calls.append((service, username))
         self.passwords[(service, username)] = value
 
     def delete_password(self, service: str, username: str) -> None:
@@ -24,7 +28,7 @@ class MemoryCredentialBackend:
 
 
 CREATED_AT = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
-DEVICE_SECRET = b"test-device-secret-that-must-not-enter-sqlite"
+DEVICE_SECRET = b"0123456789abcdef0123456789abcdef"
 
 
 def make_device() -> PairedDevice:
@@ -98,6 +102,24 @@ def test_revoke_is_idempotent_for_known_and_unknown_devices(tmp_path: Path) -> N
     assert store.get_device("unknown-device") is None
 
 
+def test_stale_save_cannot_reactivate_revoked_device(tmp_path: Path) -> None:
+    backend = MemoryCredentialBackend()
+    store = DeviceStore(SQLiteStore.open(tmp_path / "jarvis.db"), backend)
+    stale_device = make_device()
+    store.save(stale_device)
+    store.revoke(stale_device.device_id)
+    backend.set_calls.clear()
+
+    store.save(stale_device)
+
+    saved = store.get_device(stale_device.device_id)
+    assert saved is not None
+    assert saved.revoked is True
+    assert store.get_secret(stale_device.device_id) is None
+    assert backend.set_calls == []
+    assert ("jarvis-bridge-device", stale_device.device_id) not in backend.passwords
+
+
 def test_get_secret_returns_none_when_credential_is_missing(tmp_path: Path) -> None:
     backend = MemoryCredentialBackend()
     store = DeviceStore(SQLiteStore.open(tmp_path / "jarvis.db"), backend)
@@ -106,6 +128,30 @@ def test_get_secret_returns_none_when_credential_is_missing(tmp_path: Path) -> N
 
     assert store.get_secret("device-01") is None
     assert store.get_secret("unknown-device") is None
+
+
+def test_get_secret_returns_none_for_invalid_base64_credential(tmp_path: Path) -> None:
+    backend = MemoryCredentialBackend()
+    store = DeviceStore(SQLiteStore.open(tmp_path / "jarvis.db"), backend)
+    store.save(make_device())
+    backend.passwords[("jarvis-bridge-device", "device-01")] = "not valid base64!"
+
+    assert store.get_secret("device-01") is None
+
+
+@pytest.mark.parametrize("secret_length", [31, 33])
+def test_get_secret_returns_none_for_wrong_length_credential(
+    tmp_path: Path,
+    secret_length: int,
+) -> None:
+    backend = MemoryCredentialBackend()
+    store = DeviceStore(SQLiteStore.open(tmp_path / "jarvis.db"), backend)
+    store.save(make_device())
+    backend.passwords[("jarvis-bridge-device", "device-01")] = base64.urlsafe_b64encode(
+        b"x" * secret_length
+    ).decode()
+
+    assert store.get_secret("device-01") is None
 
 
 def test_sqlite_never_contains_device_secret(tmp_path: Path) -> None:

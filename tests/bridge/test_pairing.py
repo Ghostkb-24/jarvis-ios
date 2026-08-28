@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hmac
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 
 import pytest
 
@@ -18,6 +21,36 @@ def make_session() -> PairingSession:
     )
 
 
+@pytest.mark.parametrize(
+    "bridge_url",
+    [
+        "http://192.168.1.20:8443",
+        "https://8.8.8.8:8443",
+        "https://example.com:8443",
+        "https://user:password@192.168.1.20:8443",
+    ],
+)
+def test_create_rejects_non_https_or_non_private_bridge_url(bridge_url: str) -> None:
+    with pytest.raises(ValueError, match="private HTTPS"):
+        PairingSession.create(
+            bridge_id="bridge-01",
+            bridge_url=bridge_url,
+            certificate_sha256="ab" * 32,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("fingerprint", ["AB" * 32, "ab" * 31, "zz" * 32])
+def test_create_rejects_malformed_certificate_fingerprint(fingerprint: str) -> None:
+    with pytest.raises(ValueError, match="fingerprint"):
+        PairingSession.create(
+            bridge_id="bridge-01",
+            bridge_url="https://192.168.1.20:8443",
+            certificate_sha256=fingerprint,
+            now=NOW,
+        )
+
+
 def test_claim_succeeds_only_once() -> None:
     session = make_session()
 
@@ -31,6 +64,32 @@ def test_claim_succeeds_only_once() -> None:
     assert len(device.secret) >= 32
     with pytest.raises(PairingClaimError, match="already claimed"):
         session.claim("Other iPhone", session.proof, NOW + timedelta(seconds=2))
+
+
+def test_simultaneous_claims_allow_exactly_one_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = make_session()
+    comparison_barrier = Barrier(2)
+    real_compare_digest = hmac.compare_digest
+
+    def synchronized_compare_digest(left: bytes, right: bytes) -> bool:
+        comparison_barrier.wait(timeout=2)
+        return real_compare_digest(left, right)
+
+    monkeypatch.setattr(hmac, "compare_digest", synchronized_compare_digest)
+
+    def claim() -> str:
+        try:
+            session.claim("Alice's iPhone", session.proof, NOW + timedelta(seconds=1))
+        except PairingClaimError as error:
+            return str(error)
+        return "success"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim) for _ in range(2)]
+        outcomes = [future.result(timeout=3) for future in futures]
+
+    assert outcomes.count("success") == 1
+    assert outcomes.count("pairing session already claimed") == 1
 
 
 def test_claim_rejects_expired_session() -> None:
