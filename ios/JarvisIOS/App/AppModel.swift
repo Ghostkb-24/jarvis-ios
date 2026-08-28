@@ -79,8 +79,34 @@ enum AppTab: Hashable, Sendable {
     case devices
 }
 
+public enum RemoteToolProposal: Equatable, Sendable {
+    case sendWeChatMessage(recipient: String, message: String)
+
+    var requestPayload: [String: JSONValue]? {
+        switch self {
+        case let .sendWeChatMessage(recipient, message):
+            let normalizedRecipient = recipient.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard
+                !normalizedRecipient.isEmpty,
+                !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return nil
+            }
+            return [
+                "tool": .string("send_wechat_message"),
+                "arguments": .object([
+                    "contact": .string(normalizedRecipient),
+                    "message": .string(message),
+                ]),
+            ]
+        }
+    }
+}
+
 @MainActor
-final class AppModel: ObservableObject {
+public final class AppModel: ObservableObject {
     enum Phase: Equatable, Sendable {
         case idle
         case listening
@@ -142,6 +168,66 @@ final class AppModel: ObservableObject {
                 "不要重复发送，请检查目标应用"
             }
         }
+
+        var acceptsNewOperation: Bool {
+            switch self {
+            case .idle, .completed, .failed, .resultUnknown:
+                true
+            default:
+                false
+            }
+        }
+
+        var blocksCompetingInput: Bool {
+            switch self {
+            case .thinking, .awaitingConfirmation, .executing:
+                true
+            default:
+                false
+            }
+        }
+
+        func allowsTransition(to next: Phase) -> Bool {
+            if self == next { return true }
+            if case .offline = next { return true }
+
+            switch (self, next) {
+            case (.offline, .idle),
+                 (.idle, .listening),
+                 (.idle, .thinking),
+                 (.listening, .transcribing),
+                 (.listening, .idle),
+                 (.transcribing, .thinking),
+                 (.transcribing, .idle),
+                 (.transcribing, .failed),
+                 (.thinking, .awaitingConfirmation),
+                 (.thinking, .executing),
+                 (.thinking, .completed),
+                 (.thinking, .failed),
+                 (.thinking, .idle),
+                 (.thinking, .resultUnknown),
+                 (.awaitingConfirmation, .executing),
+                 (.awaitingConfirmation, .idle),
+                 (.awaitingConfirmation, .failed),
+                 (.awaitingConfirmation, .resultUnknown),
+                 (.executing, .completed),
+                 (.executing, .failed),
+                 (.executing, .idle),
+                 (.executing, .resultUnknown),
+                 (.completed, .idle),
+                 (.completed, .listening),
+                 (.completed, .thinking),
+                 (.failed, .idle),
+                 (.failed, .listening),
+                 (.failed, .thinking),
+                 (.resultUnknown, .idle),
+                 (.resultUnknown, .listening),
+                 (.resultUnknown, .thinking):
+                true
+            default:
+                false
+            }
+        }
     }
 
     @Published var selectedTab: AppTab = .conversation
@@ -157,6 +243,8 @@ final class AppModel: ObservableObject {
 
     private let client: (any JarvisBridgeClient)?
     private let deviceID: String
+    private var operationGeneration: UInt64 = 0
+    private var activeGeneration: UInt64?
 
     init(
         client: (any JarvisBridgeClient)? = nil,
@@ -264,64 +352,110 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateConnection(_ snapshot: DeviceSnapshot) {
+        device = snapshot
+        if snapshot.isConnected {
+            if phase == .offline {
+                _ = transition(to: .idle)
+                notice = nil
+            }
+        } else {
+            invalidateActiveOperation()
+            _ = transition(to: .offline)
+            notice = "电脑连接已断开，进行中的响应将被忽略"
+        }
+    }
+
     func toggleVoice() {
-        notice = nil
         switch phase {
         case .listening:
-            phase = .transcribing
+            notice = nil
+            _ = transition(to: .transcribing)
         case .offline:
             notice = "电脑离线，语音草稿不会自动发送"
+        case .thinking, .awaitingConfirmation, .executing:
+            notice = "当前请求尚未结束，请先处理当前状态"
         default:
-            phase = .listening
+            guard transition(to: .listening) else {
+                notice = "当前状态无法开始语音输入"
+                return
+            }
+            notice = nil
         }
     }
 
     func submitComposer() {
-        let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        guard let client, isConnected else {
-            phase = .offline
-            notice = "请求草稿已保留"
-            return
+        let text = composerText
+        if submit(text: text) {
+            composerText = ""
         }
+    }
 
-        notice = nil
-        messages.append(ConversationMessage(author: .user, text: text))
-        composerText = ""
-        phase = .thinking
+    @discardableResult
+    public func submit(text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return false }
+        guard phase.acceptsNewOperation else {
+            notice = "当前请求尚未结束，请先处理当前状态"
+            return false
+        }
+        guard let client, isConnected else {
+            _ = transition(to: .offline)
+            notice = "请求草稿已保留"
+            return false
+        }
 
         let request: BridgeRequest
         do {
-            request = try makeRequest(kind: .chat, payload: ["text": .string(text)])
+            request = try makeRequest(
+                kind: .chat,
+                payload: ["text": .string(normalized)]
+            )
         } catch {
-            phase = .failed
             notice = "无法创建安全请求"
-            return
+            return false
+        }
+        return startSubmission(
+            request,
+            client: client,
+            userMessage: normalized
+        )
+    }
+
+    @discardableResult
+    public func submit(proposal: RemoteToolProposal) -> Bool {
+        guard phase.acceptsNewOperation else {
+            notice = "当前请求尚未结束，请先处理当前状态"
+            return false
+        }
+        guard let client, isConnected else {
+            _ = transition(to: .offline)
+            notice = "电脑离线，操作提案未发送"
+            return false
+        }
+        guard let payload = proposal.requestPayload else {
+            notice = "操作目标或内容不能为空"
+            return false
         }
 
-        testingClientCallCount += 1
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let response = try await client.submit(request)
-                self.apply(response)
-            } catch BridgeError.resultUnknown {
-                self.phase = .resultUnknown
-            } catch {
-                self.phase = .failed
-                self.notice = "请求未完成"
-            }
+        let request: BridgeRequest
+        do {
+            request = try makeRequest(kind: .tool, payload: payload)
+        } catch {
+            notice = "无法创建安全操作请求"
+            return false
         }
+        return startSubmission(request, client: client, userMessage: nil)
     }
 
     func allow(_ preview: ActionPreview) {
         guard pendingAction == preview else { return }
         guard let client, isConnected else {
-            phase = .offline
+            invalidateActiveOperation()
+            _ = transition(to: .offline)
             return
         }
 
-        phase = .executing
         let confirmation: BridgeRequest
         do {
             confirmation = try makeRequest(
@@ -329,11 +463,12 @@ final class AppModel: ObservableObject {
                 payload: ["target_request_id": .string(preview.requestID)]
             )
         } catch {
-            phase = .failed
             notice = "无法创建确认请求"
             return
         }
+        guard let generation = beginConfirmationOperation() else { return }
 
+        notice = nil
         testingClientCallCount += 1
         Task { [weak self] in
             guard let self else { return }
@@ -342,49 +477,140 @@ final class AppModel: ObservableObject {
                     preview.requestID,
                     confirmation: confirmation
                 )
-                self.apply(response)
+                self.apply(response, ownedBy: generation)
             } catch BridgeError.resultUnknown {
-                self.phase = .resultUnknown
+                self.receiveResultUnknown(ownedBy: generation)
             } catch {
-                self.phase = .failed
-                self.notice = "确认请求未完成"
+                self.receiveFailure(
+                    "确认请求未完成",
+                    ownedBy: generation
+                )
             }
         }
     }
 
     func cancelPreview(_ preview: ActionPreview) {
         guard pendingAction == preview else { return }
-        phase = .idle
+        invalidateActiveOperation()
+        _ = transition(to: .idle)
         notice = "已取消，未执行"
     }
 
-    private func apply(_ response: BridgeResponse) {
+    private func startSubmission(
+        _ request: BridgeRequest,
+        client: any JarvisBridgeClient,
+        userMessage: String?
+    ) -> Bool {
+        guard let generation = beginRemoteOperation() else { return false }
+        notice = nil
+        if let userMessage {
+            messages.append(ConversationMessage(author: .user, text: userMessage))
+        }
+        testingClientCallCount += 1
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let response = try await client.submit(request)
+                self.apply(response, ownedBy: generation)
+            } catch BridgeError.resultUnknown {
+                self.receiveResultUnknown(ownedBy: generation)
+            } catch {
+                self.receiveFailure("请求未完成", ownedBy: generation)
+            }
+        }
+        return true
+    }
+
+    private func apply(_ response: BridgeResponse, ownedBy generation: UInt64) {
+        guard activeGeneration == generation else { return }
+
         switch response.state {
         case .preparing:
-            phase = .thinking
+            _ = transition(to: .thinking, ownedBy: generation)
         case .awaitingConfirmation:
             guard let preview = actionPreview(from: response) else {
-                phase = .failed
+                _ = transition(to: .failed, ownedBy: generation)
                 notice = "动作预览不完整，未执行操作"
+                finishOperation(generation)
                 return
             }
-            phase = .awaitingConfirmation(preview)
+            _ = transition(to: .awaitingConfirmation(preview), ownedBy: generation)
         case .executing:
-            phase = .executing
+            _ = transition(to: .executing, ownedBy: generation)
         case .completed:
-            phase = .completed
+            guard transition(to: .completed, ownedBy: generation) else { return }
             if let summary = stringValue(response.payload["summary"]), !summary.isEmpty {
                 messages.append(ConversationMessage(author: .jarvis, text: summary))
             }
+            finishOperation(generation)
         case .failed:
-            phase = .failed
+            guard transition(to: .failed, ownedBy: generation) else { return }
             notice = stringValue(response.payload["summary"])
+            finishOperation(generation)
         case .cancelled:
-            phase = .idle
+            guard transition(to: .idle, ownedBy: generation) else { return }
             notice = "已取消，未执行"
+            finishOperation(generation)
         case .resultUnknown:
-            phase = .resultUnknown
+            guard transition(to: .resultUnknown, ownedBy: generation) else { return }
+            finishOperation(generation)
         }
+    }
+
+    private func beginRemoteOperation() -> UInt64? {
+        guard phase.acceptsNewOperation else { return nil }
+        return beginOperation(transitioningTo: .thinking)
+    }
+
+    private func beginConfirmationOperation() -> UInt64? {
+        guard case .awaitingConfirmation = phase else { return nil }
+        return beginOperation(transitioningTo: .executing)
+    }
+
+    private func beginOperation(transitioningTo next: Phase) -> UInt64? {
+        operationGeneration &+= 1
+        let generation = operationGeneration
+        activeGeneration = generation
+        guard transition(to: next, ownedBy: generation) else {
+            activeGeneration = nil
+            return nil
+        }
+        return generation
+    }
+
+    @discardableResult
+    private func transition(
+        to next: Phase,
+        ownedBy generation: UInt64? = nil
+    ) -> Bool {
+        if let generation, activeGeneration != generation { return false }
+        guard phase.allowsTransition(to: next) else { return false }
+        phase = next
+        return true
+    }
+
+    private func receiveResultUnknown(ownedBy generation: UInt64) {
+        guard activeGeneration == generation else { return }
+        guard transition(to: .resultUnknown, ownedBy: generation) else { return }
+        finishOperation(generation)
+    }
+
+    private func receiveFailure(_ message: String, ownedBy generation: UInt64) {
+        guard activeGeneration == generation else { return }
+        guard transition(to: .failed, ownedBy: generation) else { return }
+        notice = message
+        finishOperation(generation)
+    }
+
+    private func finishOperation(_ generation: UInt64) {
+        guard activeGeneration == generation else { return }
+        activeGeneration = nil
+    }
+
+    private func invalidateActiveOperation() {
+        operationGeneration &+= 1
+        activeGeneration = nil
     }
 
     private func actionPreview(from response: BridgeResponse) -> ActionPreview? {

@@ -64,6 +64,8 @@ struct ConversationView: View {
     private var voiceCore: some View {
         VStack(spacing: 2) {
             VoiceOrb(phase: model.phase, action: model.toggleVoice)
+                .disabled(model.phase.blocksCompetingInput)
+                .opacity(model.phase.blocksCompetingInput ? 0.66 : 1)
 
             Text(model.phase.title)
                 .font(.title3.weight(.semibold))
@@ -154,6 +156,7 @@ struct ConversationView: View {
             .accessibilityLabel("发送消息")
         }
         .accessibilityIdentifier("composer")
+        .disabled(model.phase.blocksCompetingInput)
     }
 
     private func sectionTitle(_ title: String) -> some View {
