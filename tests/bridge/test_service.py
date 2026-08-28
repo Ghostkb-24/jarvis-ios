@@ -255,6 +255,29 @@ def test_restart_marks_interrupted_execution_result_unknown(tmp_path: Path) -> N
     assert recovered.state is TaskState.RESULT_UNKNOWN
 
 
+def test_restarted_sensitive_confirmation_never_executes_redacted_arguments(tmp_path: Path) -> None:
+    """Fails if a restart lets a confirmation send a placeholder recipient or message."""
+    database_path = tmp_path / "state.db"
+    backend = MemoryCredentialBackend()
+    sent: list[tuple[str, str]] = []
+    first, store, _ = make_service(database_path, backend=backend, sent_messages=sent)
+    request = bridge_request(
+        payload={"tool": "send_wechat_message", "arguments": {"contact": "A", "message": "B"}}
+    )
+    first.submit(request, signed(request))
+    store.close()
+    restarted, _, _ = make_service(database_path, backend=backend, sent_messages=sent)
+    confirmation = bridge_request(
+        request_id="confirm-after-restart", idempotency_key="confirm-after-restart",
+        kind="confirm", payload={"target_request_id": request.request_id},
+    )
+
+    response = restarted.confirm(request.request_id, confirmation, signed(confirmation))
+
+    assert response.state is TaskState.RESULT_UNKNOWN
+    assert sent == []
+
+
 def test_idempotency_key_cannot_be_reused_for_different_request(tmp_path: Path) -> None:
     """Fails if one idempotency key aliases distinct signed operations."""
     service, _, _ = make_service(tmp_path / "state.db")

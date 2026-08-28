@@ -278,6 +278,15 @@ class BridgeService:
             return self._ledger.cancel(request_id).response()
         if record.state is not TaskState.AWAITING_CONFIRMATION:
             return record.response()
+        if record.tool_name == "send_wechat_message" and any(
+            record.arguments.get(key) == "[REDACTED]" for key in ("contact", "message")
+        ):
+            return self._ledger.finish(
+                request_id,
+                state=TaskState.RESULT_UNKNOWN,
+                response_payload={"summary": "敏感操作在重启后失效，请重新发起。"},
+                result_summary="敏感操作在重启后失效。",
+            ).response()
         return self._execute_once(record).response()
 
     def _execute_once(self, record: TaskRecord) -> TaskRecord:
