@@ -12,6 +12,10 @@ proof as text.
 Implementation commit: `87802a4bfc4e511fc12cddc9c6638ed0b57ae00d`
 (`fix: harden bridge production lifecycle`).
 
+Review-round-1 TLS remediation commit:
+`bf8f18d66e1cb07a8fbb5f81b9d7d4ec50c888d3`
+(`fix: protect bridge TLS key before write`).
+
 ## Blockers closed
 
 ### A. Controller ownership
@@ -56,6 +60,26 @@ Implementation commit: `87802a4bfc4e511fc12cddc9c6638ed0b57ae00d`
 - `PairingQrDialog` renders the serialized payload as a QR pixmap; the proof
   is never put in sidebar status, dialog labels, log output, or audit fields.
 
+## Review round 1 — protected TLS materialization
+
+The initial Task 3A implementation removed its temporary private-key file, but
+the review correctly found two gaps: it wrote the key before hardening the
+file's DACL and it attempted deletion only once.  The remediation now:
+
+- ACL-hardens the newly created, empty file before the first private-key byte
+  is written.  On Windows, `icacls` removes inheritance, grants only the
+  current SID full control, and then runs its DACL verification command.  An
+  ACL/verification error aborts materialization before writing.
+- Retries deletion three times with a short bounded delay for sharing failures.
+- If all deletion attempts fail, overwrites the file contents with zeroes,
+  fsyncs, truncates to zero length, and registers bounded deferred cleanup at
+  process exit.  If sanitization itself fails, startup/failure handling raises
+  rather than silently leaving a private-key residual.
+
+The code continues to pass through the original TLS load failure after a
+successful sanitize, so the caller receives the real certificate-loading error
+while the residual contains no key material.
+
 ## TDD evidence
 
 The inherited Task 3A worktree contained RED/GREEN basetemp evidence for the
@@ -78,6 +102,28 @@ The final focused lifecycle and Bridge run passed 132 tests, including the
 controller ownership, TLS cleanup, retry/quit ordering, QR rendering, session
 rotation, and service-synchronization regressions.
 
+### Review-round-1 RED/GREEN evidence
+
+Before changing production code, four new TLS regressions were run against
+`52b8c84`:
+
+```text
+4 failed, 16 passed in 1.48s
+```
+
+They independently demonstrated that the ACL hook saw a complete private key,
+an ACL failure occurred after the write, one injected `PermissionError`
+escaped cleanup, and permanent unlink failure replaced the original TLS-load
+error while retaining private-key bytes.  The minimal remediation above made
+the same focused TLS file green:
+
+```text
+20 passed in 1.42s
+```
+
+The final focused lifecycle plus Bridge run then passed 135 tests, and the
+complete suite passed 184 tests.
+
 ## Verification
 
 All commands ran from
@@ -93,6 +139,11 @@ with `PYTHONPATH=src` and Python `py -3.12`.
 | `git diff --check` | passed (no whitespace errors) |
 | `git diff --cached --check` | passed before the implementation commit |
 | `git show --check --oneline HEAD` | passed for the prior base commit; implementation commit was then created from an already checked index |
+| `py -3.12 -m pytest tests/bridge/test_tls.py -q --basetemp=.pytest-task3a-r1-red` | `4 failed, 16 passed in 1.48s` (expected RED) |
+| `py -3.12 -m pytest tests/bridge/test_tls.py -q --basetemp=.pytest-task3a-r1-green-2` | `20 passed in 1.42s` |
+| `py -3.12 -m pytest tests/test_app.py tests/bridge -q --basetemp=.pytest-task3a-r1-focused` | `135 passed in 17.29s` |
+| `py -3.12 -m pytest -q --basetemp=.pytest-task3a-r1-full` | `184 passed in 17.75s` |
+| `py -3.12 -m pip check` | `No broken requirements found.` |
 
 The task-specific pytest basetemp directories were inspected to contain only
 pytest outputs (temporary SQLite databases, test certificates, and test files)
@@ -116,8 +167,9 @@ and removed after verification; no private-key temp file was retained.
 ## Remaining concerns
 
 - The temporary file necessarily exists briefly while Python's SSL library
-  loads the private key.  It is current-user ACL protected on Windows and is
-  removed before Uvicorn starts; a fully memory-only key-loading API is not
-  available in the standard-library `SSLContext` interface.
+  loads the private key.  It is ACL-protected before the write, and is removed
+  before Uvicorn starts or sanitized to an empty file if sharing locks prevent
+  immediate deletion; a fully memory-only key-loading API is not available in
+  the standard-library `SSLContext` interface.
 - This task intentionally makes no Swift/iOS Task 4+ changes and does not
   alter the SDD ledger.
