@@ -10,7 +10,16 @@ from jarvis_assistant.orchestrator import EventKind, OrchestratorEvent
 def test_runtime_registers_expected_tray_actions(qtbot, tmp_path) -> None:
     runtime = build_application(data_dir=tmp_path, test_mode=True)
     labels = [action.text() for action in runtime.tray.contextMenu().actions()]
-    assert labels == ["打开控制台", "开始说话", "常驻唤醒", "暂停助手", "设置", "退出"]
+    assert labels == [
+        "打开控制台",
+        "开始说话",
+        "常驻唤醒",
+        "暂停助手",
+        "显示 iPhone 配对码",
+        "停止手机连接",
+        "设置",
+        "退出",
+    ]
     runtime.shutdown()
 
 
@@ -78,6 +87,108 @@ def test_shutdown_closes_store_and_hotkey(qtbot, tmp_path) -> None:
     runtime.shutdown()
     assert runtime.hotkey.closed
     assert runtime.closed
+
+
+def test_mobile_server_stops_and_joins_before_sqlite_closes(qtbot, tmp_path) -> None:
+    """Fails if shutdown closes persistence while the mobile server can still use it."""
+    events: list[str] = []
+
+    class RecordingMobileServer:
+        def start(self) -> None:
+            events.append("start")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+            events.append("server_stopped")
+
+    mobile_server = RecordingMobileServer()
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        mobile_server=mobile_server,
+    )
+    close_store = runtime.store.close
+
+    def record_close() -> None:
+        events.append("sqlite_closed")
+        close_store()
+
+    runtime.store.close = record_close
+    runtime.shutdown()
+
+    assert events == ["start", "server_stopped", "sqlite_closed"]
+
+
+def test_stop_mobile_connection_runs_off_qt_thread(qtbot, tmp_path) -> None:
+    """Fails if the tray action blocks the UI while joining the Uvicorn thread."""
+    calls: list[str] = []
+
+    class RecordingMobileServer:
+        def start(self) -> None:
+            calls.append("start")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+            calls.append("stop")
+
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        mobile_server=RecordingMobileServer(),
+    )
+    runtime.stop_mobile_connection()
+
+    qtbot.waitUntil(lambda: calls == ["start", "stop"])
+    runtime.shutdown()
+
+
+def test_shutdown_waits_for_an_inflight_mobile_stop_before_closing_sqlite(
+    qtbot,
+    tmp_path,
+) -> None:
+    """Fails if an asynchronous tray stop lets shutdown close SQLite too early."""
+    from threading import Event, Lock
+
+    events: list[str] = []
+    first_stop_started = Event()
+    release_first_stop = Event()
+    call_lock = Lock()
+    stop_calls = 0
+
+    class RecordingMobileServer:
+        def start(self) -> None:
+            events.append("start")
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            nonlocal stop_calls
+            del timeout
+            with call_lock:
+                stop_calls += 1
+                call_number = stop_calls
+            if call_number == 1:
+                first_stop_started.set()
+                assert release_first_stop.wait(timeout=2)
+            else:
+                events.append("server_stopped")
+
+    runtime = build_application(
+        data_dir=tmp_path,
+        test_mode=True,
+        mobile_server=RecordingMobileServer(),
+    )
+    close_store = runtime.store.close
+
+    def record_close() -> None:
+        events.append("sqlite_closed")
+        close_store()
+
+    runtime.store.close = record_close
+    runtime.stop_mobile_connection()
+    assert first_stop_started.wait(timeout=2)
+    runtime.shutdown()
+    release_first_stop.set()
+
+    assert events.index("server_stopped") < events.index("sqlite_closed")
 
 
 def test_cloud_fallback_confirmation_calls_use_cloud(qtbot, tmp_path) -> None:

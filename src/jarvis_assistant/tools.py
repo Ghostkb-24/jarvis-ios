@@ -297,6 +297,12 @@ def default_registry(
         path = arguments.path.resolve()
         if not path.is_file():
             return ToolResult(ok=False, code="file_not_found", message="文件不存在。")
+        if not roots:
+            return ToolResult(
+                ok=False,
+                code="file_not_allowed",
+                message="尚未配置允许打开的文件目录。",
+            )
         if roots and not any(path.is_relative_to(root) for root in roots):
             return ToolResult(ok=False, code="file_not_allowed", message="文件不在允许范围内。")
         launch_file(str(path))

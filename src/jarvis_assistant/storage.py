@@ -33,7 +33,7 @@ class SQLiteStore:
     def open(cls, path: str | Path) -> SQLiteStore:
         database_path = Path(path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        store = cls(sqlite3.connect(database_path))
+        store = cls(sqlite3.connect(database_path, check_same_thread=False))
         store._migrate()
         return store
 

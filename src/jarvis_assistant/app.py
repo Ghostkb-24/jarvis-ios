@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
@@ -87,6 +87,12 @@ class MemoryCredentialStore:
         self._key = value or None
 
 
+class MobileServer(Protocol):
+    def start(self) -> None: ...
+
+    def stop_and_join(self, timeout: float | None = None) -> None: ...
+
+
 class PynputHotkey:
     def __init__(self, callback: Callable[[], None]) -> None:
         try:
@@ -122,6 +128,8 @@ class ApplicationRuntime(QObject):
         recorder: AudioRecorder,
         transcriber: FasterWhisperTranscriber,
         wake_listener: NoopWakeWord | WakeWordListener,
+        mobile_server: MobileServer | None = None,
+        pairing_code_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.store = store
@@ -134,6 +142,8 @@ class ApplicationRuntime(QObject):
         self.recorder = recorder
         self.transcriber = transcriber
         self.wake_listener = wake_listener
+        self.mobile_server = mobile_server
+        self._pairing_code_callback = pairing_code_callback
         self.wake_bridge = HotkeyBridge()
         self.sidebar = CompactSidebar()
         self.console = TaskConsole()
@@ -160,6 +170,8 @@ class ApplicationRuntime(QObject):
             ("开始说话", self.toggle_recording),
             ("常驻唤醒", self.toggle_wake_word),
             ("暂停助手", self.toggle_pause),
+            ("显示 iPhone 配对码", self.show_pairing_code),
+            ("停止手机连接", self.stop_mobile_connection),
             ("设置", self.settings_dialog.show),
             ("退出", self.shutdown),
         )
@@ -214,6 +226,30 @@ class ApplicationRuntime(QObject):
     def toggle_pause(self) -> None:
         self.paused = not self.paused
         self.sidebar.set_status("助手已暂停" if self.paused else "准备就绪")
+
+    @Slot()
+    def show_pairing_code(self) -> None:
+        if self._pairing_code_callback is None:
+            self.sidebar.set_status("尚未配置手机连接。")
+            return
+        self._pairing_code_callback()
+
+    @Slot()
+    def stop_mobile_connection(self) -> None:
+        server = self.mobile_server
+        if server is None:
+            self.sidebar.set_status("手机连接已停止。")
+            return
+
+        def stopped(_result: object) -> None:
+            if self.mobile_server is server:
+                self.mobile_server = None
+            self.sidebar.set_status("手机连接已停止。")
+
+        self._run_background(
+            server.stop_and_join,
+            stopped,
+        )
 
     @Slot()
     def toggle_wake_word(self) -> None:
@@ -373,6 +409,10 @@ class ApplicationRuntime(QObject):
             return
         self.closed = True
         self._persist_window_state()
+        mobile_server = self.mobile_server
+        self.mobile_server = None
+        if mobile_server is not None:
+            mobile_server.stop_and_join()
         self.hotkey.close()
         self.wake_listener.stop()
         if self.recorder.recording:
@@ -405,6 +445,8 @@ def build_application(
     *,
     data_dir: str | Path | None = None,
     test_mode: bool = False,
+    mobile_server: MobileServer | None = None,
+    pairing_code_callback: Callable[[], None] | None = None,
 ) -> ApplicationRuntime:
     app = QApplication.instance()
     if app is None:
@@ -469,7 +511,11 @@ def build_application(
                 )
             )
         ),
+        mobile_server=mobile_server,
+        pairing_code_callback=pairing_code_callback,
     )
+    if mobile_server is not None:
+        mobile_server.start()
     if not test_mode:
         runtime._resume_wake()
     if settings.sidebar_visible:
