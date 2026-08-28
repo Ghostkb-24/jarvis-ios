@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import csv
 import hashlib
 import ipaddress
@@ -7,6 +8,7 @@ import os
 import ssl
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -27,6 +29,11 @@ class BridgeTLSIdentityError(RuntimeError):
     """Raised when an established TLS identity cannot be loaded safely."""
 
 
+_PRIVATE_KEY_DELETE_ATTEMPTS = 3
+_PRIVATE_KEY_DELETE_RETRY_SECONDS = 0.02
+_DEFERRED_PRIVATE_KEY_CLEANUP: set[Path] = set()
+
+
 def create_server_ssl_context(
     identity: BridgeTLSIdentity,
     *,
@@ -44,21 +51,81 @@ def create_server_ssl_context(
         dir=directory,
     )
     key_path = Path(temporary_name)
+    active_error: BaseException | None = None
     try:
         os.chmod(key_path, 0o600)
+        _restrict_private_key_to_current_user(key_path)
         with os.fdopen(descriptor, "wb") as private_key_file:
             descriptor = -1
             private_key_file.write(identity.private_key_pem)
             private_key_file.flush()
             os.fsync(private_key_file.fileno())
-        _restrict_private_key_to_current_user(key_path)
         context = context_factory(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(str(certificate_path), str(key_path))
         return context
+    except BaseException as error:
+        active_error = error
+        raise
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        key_path.unlink(missing_ok=True)
+        try:
+            _remove_temporary_private_key(key_path)
+        except BridgeTLSIdentityError as cleanup_error:
+            if active_error is None:
+                raise
+            raise BridgeTLSIdentityError(
+                "could not safely clean up temporary TLS private key"
+            ) from cleanup_error
+
+
+def _remove_temporary_private_key(path: Path) -> None:
+    if _unlink_private_key_with_retries(path):
+        return
+    _overwrite_and_truncate_private_key(path)
+    _schedule_deferred_private_key_cleanup(path)
+
+
+def _unlink_private_key_with_retries(path: Path) -> bool:
+    for attempt in range(_PRIVATE_KEY_DELETE_ATTEMPTS):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 < _PRIVATE_KEY_DELETE_ATTEMPTS:
+                time.sleep(_PRIVATE_KEY_DELETE_RETRY_SECONDS)
+    return False
+
+
+def _overwrite_and_truncate_private_key(path: Path) -> None:
+    try:
+        with path.open("r+b", buffering=0) as private_key_file:
+            byte_count = private_key_file.seek(0, os.SEEK_END)
+            private_key_file.seek(0)
+            while byte_count:
+                chunk_size = min(byte_count, 64 * 1024)
+                private_key_file.write(b"\0" * chunk_size)
+                byte_count -= chunk_size
+            private_key_file.flush()
+            os.fsync(private_key_file.fileno())
+            private_key_file.truncate(0)
+            private_key_file.flush()
+            os.fsync(private_key_file.fileno())
+    except OSError as error:
+        raise BridgeTLSIdentityError("could not sanitize temporary TLS private key") from error
+
+
+def _schedule_deferred_private_key_cleanup(path: Path) -> None:
+    if path in _DEFERRED_PRIVATE_KEY_CLEANUP:
+        return
+    _DEFERRED_PRIVATE_KEY_CLEANUP.add(path)
+    atexit.register(_retry_deferred_private_key_cleanup, path)
+
+
+def _retry_deferred_private_key_cleanup(path: Path) -> None:
+    _unlink_private_key_with_retries(path)
 
 
 def _restrict_private_key_to_current_user(path: Path) -> None:
@@ -85,6 +152,12 @@ def _restrict_private_key_to_current_user(path: Path) -> None:
             "/grant:r",
             f"*{rows[0][1]}:(F)",
         ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [str(icacls), str(path), "/verify"],
         check=True,
         capture_output=True,
         text=True,

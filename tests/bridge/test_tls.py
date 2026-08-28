@@ -234,28 +234,28 @@ def test_missing_or_corrupt_private_key_fails_closed(
     assert (tmp_path / "bridge-01.pem").read_bytes() == identity.certificate_pem
 
 
-def test_server_ssl_context_hardens_then_removes_temporary_private_key(
+def test_server_ssl_context_protects_empty_key_file_before_writing_private_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fails if TLS loads before ACL hardening or leaves a private-key copy behind."""
+    """Fails if the ACL hook sees private-key bytes before it protects the file."""
     identity = create_identity(tmp_path, MemoryCredentialBackend())
     certificate_path = tmp_path / "bridge-01.pem"
-    hardened: list[Path] = []
+    protected_contents: list[bytes] = []
     loaded_key_path: list[Path] = []
 
     class RecordingContext:
         def load_cert_chain(self, certfile: str, keyfile: str) -> None:
             key_path = Path(keyfile)
             assert Path(certfile) == certificate_path
-            assert hardened == [key_path]
             assert key_path.exists()
+            assert key_path.read_bytes() == identity.private_key_pem
             loaded_key_path.append(key_path)
 
     monkeypatch.setattr(
         tls_module,
         "_restrict_private_key_to_current_user",
-        lambda path: hardened.append(path),
+        lambda path: protected_contents.append(path.read_bytes()),
     )
 
     context = create_server_ssl_context(
@@ -266,9 +266,72 @@ def test_server_ssl_context_hardens_then_removes_temporary_private_key(
     )
 
     assert isinstance(context, RecordingContext)
+    assert protected_contents == [b""]
     assert len(loaded_key_path) == 1
     assert not loaded_key_path[0].exists()
     assert not list(tmp_path.glob(".jarvis-bridge-*.key"))
+
+
+def test_server_ssl_context_aborts_before_writing_when_acl_protection_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if an ACL error occurs only after the private key has been written."""
+    identity = create_identity(tmp_path, MemoryCredentialBackend())
+    observed_contents: list[bytes] = []
+
+    def reject_acl(path: Path) -> None:
+        observed_contents.append(path.read_bytes())
+        raise BridgeTLSIdentityError("ACL verification failed")
+
+    monkeypatch.setattr(tls_module, "_restrict_private_key_to_current_user", reject_acl)
+
+    with pytest.raises(BridgeTLSIdentityError, match="ACL verification failed"):
+        create_server_ssl_context(
+            identity,
+            certificate_path=tmp_path / "bridge-01.pem",
+            temporary_directory=tmp_path,
+        )
+
+    assert observed_contents == [b""]
+    assert not list(tmp_path.glob(".jarvis-bridge-*.key"))
+
+
+def test_server_ssl_context_retries_a_transient_private_key_unlink_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if a transient Windows sharing error prevents bounded cleanup retry."""
+    identity = create_identity(tmp_path, MemoryCredentialBackend())
+    attempts = 0
+    loaded_key_path: list[Path] = []
+    real_unlink = Path.unlink
+
+    class RecordingContext:
+        def load_cert_chain(self, certfile: str, keyfile: str) -> None:
+            del certfile
+            loaded_key_path.append(Path(keyfile))
+
+    def transient_unlink(path: Path, *args, **kwargs) -> None:
+        nonlocal attempts
+        if path.name.startswith(".jarvis-bridge-") and path.suffix == ".key":
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError("sharing violation")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", transient_unlink)
+
+    context = create_server_ssl_context(
+        identity,
+        certificate_path=tmp_path / "bridge-01.pem",
+        temporary_directory=tmp_path,
+        context_factory=lambda _protocol: RecordingContext(),
+    )
+
+    assert isinstance(context, RecordingContext)
+    assert attempts == 2
+    assert not loaded_key_path[0].exists()
 
 
 def test_server_ssl_context_removes_temporary_private_key_when_loading_fails(
@@ -298,3 +361,43 @@ def test_server_ssl_context_removes_temporary_private_key_when_loading_fails(
         )
 
     assert not list(tmp_path.glob(".jarvis-bridge-*.key"))
+
+
+def test_server_ssl_context_sanitizes_residual_key_when_unlink_never_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if a permanent delete failure leaves private-key bytes after TLS failure."""
+    identity = create_identity(tmp_path, MemoryCredentialBackend())
+    residual_paths: list[Path] = []
+    real_unlink = Path.unlink
+
+    class FailingContext:
+        def load_cert_chain(self, certfile: str, keyfile: str) -> None:
+            del certfile
+            residual_paths.append(Path(keyfile))
+            raise RuntimeError("TLS load failed")
+
+    def permanent_unlink(path: Path, *args, **kwargs) -> None:
+        if path.name.startswith(".jarvis-bridge-") and path.suffix == ".key":
+            raise PermissionError("sharing violation")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", permanent_unlink)
+
+    try:
+        with pytest.raises(RuntimeError, match="TLS load failed"):
+            create_server_ssl_context(
+                identity,
+                certificate_path=tmp_path / "bridge-01.pem",
+                temporary_directory=tmp_path,
+                context_factory=lambda _protocol: FailingContext(),
+            )
+
+        assert len(residual_paths) == 1
+        assert residual_paths[0].read_bytes() == b""
+    finally:
+        for path in residual_paths:
+            if path.exists():
+                path.write_bytes(b"")
+                real_unlink(path)
