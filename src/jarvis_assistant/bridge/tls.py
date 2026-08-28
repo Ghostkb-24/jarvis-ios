@@ -194,7 +194,7 @@ def _verify_requested_hosts(certificate: x509.Certificate, hosts: Iterable[str])
     except x509.ExtensionNotFound as error:
         raise BridgeTLSIdentityError("TLS certificate SAN extension is missing") from error
     certificate_hosts = {
-        ("dns", name.casefold())
+        ("dns", canonicalize_bridge_host(name))
         for name in alternative_names.get_values_for_type(x509.DNSName)
     }
     certificate_hosts.update(

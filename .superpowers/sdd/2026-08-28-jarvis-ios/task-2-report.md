@@ -528,3 +528,90 @@ All checks passed!
   pinning data.
 - LAN DNS classification remains syntactic; no DNS lookup, listener, or public
   discovery behavior was introduced.
+
+## Fix round 3 — legacy trailing-dot SAN migration
+
+### Implementation
+
+- Canonicalize DNS SAN values read from established certificates with the same
+  host canonicalizer used for requested hosts and newly created certificates.
+- Existing pre-fix identities whose certificate contains `bridge.local.` now
+  satisfy a request for canonical `bridge.local` without rewriting the public
+  certificate, replacing the credential-backed private key, or changing the
+  pinned SHA-256 fingerprint.
+- Added a migration regression that builds a real RSA/SHA-256 self-signed legacy
+  certificate containing the literal trailing-dot SAN, persists its public
+  certificate and test-local credential, and loads it through the current path.
+
+### RED / GREEN evidence
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_tls.py::test_reload_migrates_legacy_trailing_dot_san_without_rotation -q
+```
+
+RED output:
+
+```text
+F                                                                        [100%]
+jarvis_assistant.bridge.tls.BridgeTLSIdentityError:
+TLS certificate SAN does not cover requested hosts
+1 failed in 0.35s
+```
+
+GREEN after canonicalizing DNS SANs during established-certificate comparison:
+
+```text
+.                                                                        [100%]
+1 passed in 0.30s
+```
+
+### Final verification
+
+Focused Bridge tests:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge -q
+```
+
+```text
+........................................................                 [100%]
+56 passed in 1.29s
+```
+
+One full Python suite run:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest -q
+```
+
+```text
+........................................................................ [ 61%]
+..............................................                           [100%]
+118 passed in 12.52s
+```
+
+Ruff:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m ruff check src tests
+```
+
+```text
+All checks passed!
+```
+
+### Files changed in fix round 3
+
+- `src/jarvis_assistant/bridge/tls.py`
+- `tests/bridge/test_tls.py`
+- `.superpowers/sdd/2026-08-28-jarvis-ios/task-2-report.md`
+
+### Self-review and concerns
+
+- Migration comparison changes only the in-memory SAN key used for matching;
+  certificate and credential persistence paths are untouched, so the stable
+  identity is not rotated or rewritten.
+- The existing fail-closed behavior remains for genuinely missing SAN coverage,
+  corrupt certificates, missing keys, and key/certificate mismatches.

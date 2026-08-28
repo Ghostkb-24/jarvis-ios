@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.x509.oid import ExtensionOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtensionOID, NameOID
 
 from jarvis_assistant.bridge.tls import BridgeTLSIdentity, BridgeTLSIdentityError
 
@@ -107,6 +109,49 @@ def test_trailing_dot_host_is_canonicalized_and_reloads_stably(tmp_path: Path) -
         hosts=("bridge.local.",),
     )
     assert second.certificate_sha256 == first.certificate_sha256
+
+
+def test_reload_migrates_legacy_trailing_dot_san_without_rotation(tmp_path: Path) -> None:
+    backend = MemoryCredentialBackend()
+    certificate_path = tmp_path / "bridge.pem"
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key_pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Jarvis Bridge bridge-01")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(minutes=5))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("bridge.local.")]), False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
+        .sign(private_key, hashes.SHA256())
+    )
+    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM)
+    certificate_path.write_bytes(certificate_pem)
+    stored_private_key = private_key_pem.decode("ascii")
+    backend.set_password("jarvis-bridge-tls", "bridge-01", stored_private_key)
+    expected_fingerprint = hashlib.sha256(
+        certificate.public_bytes(serialization.Encoding.DER)
+    ).hexdigest()
+
+    loaded = BridgeTLSIdentity.load_or_create(
+        certificate_path=certificate_path,
+        credential_backend=backend,
+        bridge_id="bridge-01",
+        hosts=("bridge.local",),
+    )
+
+    assert loaded.certificate_pem == certificate_pem
+    assert loaded.certificate_sha256 == expected_fingerprint
+    assert certificate_path.read_bytes() == certificate_pem
+    assert backend.passwords[("jarvis-bridge-tls", "bridge-01")] == stored_private_key
 
 
 def test_reload_preserves_certificate_fingerprint_and_private_key(tmp_path: Path) -> None:
