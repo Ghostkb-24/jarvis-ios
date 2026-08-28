@@ -2,7 +2,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from jarvis_assistant.app import build_application
+from jarvis_assistant.app import _dispatch_orchestrator_chat, build_application
 from jarvis_assistant.domain import ToolProposal
 from jarvis_assistant.orchestrator import EventKind, OrchestratorEvent
 
@@ -288,4 +288,27 @@ def test_voice_confirmation_sends_the_single_pending_wechat_action(qtbot, tmp_pa
     runtime.submit_text("确认发送")
 
     assert answered == [("wechat-1", True)]
+    runtime.shutdown()
+
+
+def test_remote_chat_planning_never_calls_executing_orchestrator(qtbot, tmp_path) -> None:
+    """Fails if a remote chat request reaches Orchestrator.submit and executes a tool."""
+    runtime = build_application(data_dir=tmp_path, test_mode=True)
+
+    async def forbidden_submit(_text):
+        raise AssertionError("remote chat must not call Orchestrator.submit")
+
+    class PlanningProvider:
+        async def respond(self, request):
+            assert {item["name"] for item in request.tool_catalog} == {
+                "open_application", "set_volume", "search_files", "open_file", "send_wechat_message"
+            }
+            from jarvis_assistant.models import ParsedModelResponse
+            return ParsedModelResponse(text="计划回答", confidence=1.0)
+
+    runtime.orchestrator.submit = forbidden_submit
+    runtime.orchestrator._local_provider = PlanningProvider()
+
+    import asyncio
+    assert asyncio.run(_dispatch_orchestrator_chat(runtime.orchestrator, "你好")) == "计划回答"
     runtime.shutdown()

@@ -20,7 +20,7 @@ from jarvis_assistant.audio import (
     SoundDeviceBackend,
 )
 from jarvis_assistant.domain import Settings
-from jarvis_assistant.models import OllamaProvider, OpenAIProvider, ProviderRouter
+from jarvis_assistant.models import ModelRequest, OllamaProvider, OpenAIProvider, ProviderRouter
 from jarvis_assistant.orchestrator import EventKind, Orchestrator, OrchestratorEvent
 from jarvis_assistant.security import SecurityPolicy
 from jarvis_assistant.storage import CredentialStore, SQLiteStore
@@ -588,12 +588,23 @@ def _compose_mobile_bridge(
 
 
 async def _dispatch_orchestrator_chat(orchestrator: Orchestrator, text: str) -> str:
-    events = await orchestrator.submit(text)
-    final = events[-1]
-    if final.kind is EventKind.CONFIRMATION_REQUIRED:
-        orchestrator.cancel(final.action_id)
-        return "远程聊天中的工具提案必须作为已确认的 Bridge 工具请求提交。"
-    return final.message
+    """Planning-only remote chat: never invoke the desktop execution orchestrator."""
+    allowed = {
+        "open_application",
+        "set_volume",
+        "search_files",
+        "open_file",
+        "send_wechat_message",
+    }
+    catalog = [
+        item for item in orchestrator._registry.schema_catalog() if item["name"] in allowed
+    ]
+    response = await orchestrator._local_provider.respond(
+        ModelRequest(text=text, tool_catalog=catalog)
+    )
+    if response.proposal is not None:
+        return "远程工具提案必须作为已签名的 Bridge 工具请求提交。"
+    return response.text or ""
 
 
 def _default_data_dir() -> Path:
