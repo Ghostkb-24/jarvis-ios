@@ -34,6 +34,15 @@ final class BridgeModelsTests: XCTestCase {
         XCTAssertEqual(String(decoding: try request.canonicalData(), as: UTF8.self), expected)
     }
 
+    func testCanonicalPayloadMatchesPythonFloatingPointFixture() throws {
+        let request = try Fixtures.numberRequest()
+
+        XCTAssertEqual(
+            String(decoding: try request.canonicalData(), as: UTF8.self),
+            Fixtures.numberCanonicalJSON
+        )
+    }
+
     func testCodableUsesExactSnakeCaseWireNames() throws {
         let request = try Fixtures.openWeChatRequest()
         let encoded = try JSONEncoder().encode(request)
@@ -74,6 +83,51 @@ final class BridgeModelsTests: XCTestCase {
         }
     }
 
+    func testBridgeRequestRejectsUnknownTopLevelFields() {
+        let data = Data(#"{"version":1,"request_id":"req-1","device_id":"iphone-1","issued_at":"2026-08-28T00:00:00Z","idempotency_key":"idem-1","kind":"chat","payload":{},"unexpected":true}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(BridgeRequest.self, from: data)) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .unknownFields(type: "BridgeRequest", fields: ["unexpected"])
+            )
+        }
+    }
+
+    func testBridgeResponseRejectsUnknownTopLevelFields() {
+        let data = Data(#"{"version":1,"request_id":"req-1","state":"completed","risk":"low","payload":{},"unexpected":true}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(BridgeResponse.self, from: data)) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .unknownFields(type: "BridgeResponse", fields: ["unexpected"])
+            )
+        }
+    }
+
+    func testPairingPayloadRejectsUnknownTopLevelFields() {
+        let fingerprint = String(repeating: "ab", count: 32)
+        let data = Data(#"{"version":1,"bridge_id":"bridge-1","bridge_url":"https://192.168.1.20:8443","certificate_sha256":"\#(fingerprint)","session_id":"session-1","expires_at":"2026-08-28T00:02:00+00:00","proof":"proof","unexpected":true}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(PairingPayload.self, from: data)) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .unknownFields(type: "PairingPayload", fields: ["unexpected"])
+            )
+        }
+    }
+
+    func testBridgeRequestKeepsNestedPayloadObjectsOpen() throws {
+        let data = Data(#"{"version":1,"request_id":"req-1","device_id":"iphone-1","issued_at":"2026-08-28T00:00:00Z","idempotency_key":"idem-1","kind":"chat","payload":{"future_object":{"new_field":{"deeper":true}}}}"#.utf8)
+
+        let request = try JSONDecoder().decode(BridgeRequest.self, from: data)
+
+        XCTAssertEqual(
+            request.payload["future_object"],
+            .object(["new_field": .object(["deeper": .bool(true)])])
+        )
+    }
+
     func testRequestDebugDescriptionNeverContainsPayloadContent() throws {
         let request = try BridgeRequest(
             version: 1,
@@ -92,6 +146,7 @@ final class BridgeModelsTests: XCTestCase {
 
 enum Fixtures {
     static let openWeChatCanonicalJSON = #"{"device_id":"iphone-1","idempotency_key":"idem-1","issued_at":"2026-08-28T00:00:00Z","kind":"tool","payload":{"arguments":{"name":"\u5fae\u4fe1"},"tool":"open_application"},"request_id":"req-1","version":1}"#
+    static let numberCanonicalJSON = #"{"device_id":"iphone-1","idempotency_key":"idem-numbers","issued_at":"2026-08-28T00:00:00Z","kind":"chat","payload":{"numbers":{"decimal":12.5,"large":1e+20,"negative_zero":-0.0,"one":1.0,"small":1e-07}},"request_id":"req-numbers","version":1}"#
 
     static func openWeChatRequest() throws -> BridgeRequest {
         try BridgeRequest(
@@ -104,6 +159,26 @@ enum Fixtures {
             payload: [
                 "tool": .string("open_application"),
                 "arguments": .object(["name": .string("微信")]),
+            ]
+        )
+    }
+
+    static func numberRequest() throws -> BridgeRequest {
+        try BridgeRequest(
+            version: 1,
+            requestID: "req-numbers",
+            deviceID: "iphone-1",
+            issuedAt: "2026-08-28T00:00:00Z",
+            idempotencyKey: "idem-numbers",
+            kind: .chat,
+            payload: [
+                "numbers": .object([
+                    "one": .double(1.0),
+                    "decimal": .double(12.5),
+                    "large": .double(1e20),
+                    "small": .double(1e-7),
+                    "negative_zero": .double(-0.0),
+                ]),
             ]
         )
     }

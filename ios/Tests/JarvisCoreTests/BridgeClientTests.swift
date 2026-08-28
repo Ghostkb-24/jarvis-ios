@@ -130,6 +130,61 @@ final class BridgeClientTests: XCTestCase {
         )
     }
 
+    func testPinnedDelegateRejectsAll307And308RedirectDestinationsForPOSTBodies() throws {
+        let delegate = try PinnedCertificateDelegate(
+            fingerprint: String(repeating: "00", count: 32)
+        )
+        var original = URLRequest(
+            url: try XCTUnwrap(URL(string: "https://192.168.1.20:8443/v1/requests"))
+        )
+        original.httpMethod = "POST"
+        original.httpBody = Data("state-changing-body".utf8)
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: original)
+        defer {
+            task.cancel()
+            session.invalidateAndCancel()
+        }
+        let cases = [
+            (307, "http://192.168.1.20:8443/v1/requests"),
+            (307, "https://8.8.8.8:8443/v1/requests"),
+            (307, "https://192.168.1.21:8443/v1/requests"),
+            (308, "http://192.168.1.20:8443/v1/requests"),
+            (308, "https://8.8.8.8:8443/v1/requests"),
+            (308, "https://192.168.1.21:8443/v1/requests"),
+        ]
+
+        for (status, destination) in cases {
+            var proposed = URLRequest(url: try XCTUnwrap(URL(string: destination)))
+            proposed.httpMethod = "POST"
+            proposed.httpBody = Data("state-changing-body".utf8)
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: try XCTUnwrap(original.url),
+                    statusCode: status,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Location": destination]
+                )
+            )
+            let capture = RedirectCapture()
+
+            delegate.urlSession(
+                session,
+                task: task,
+                willPerformHTTPRedirection: response,
+                newRequest: proposed
+            ) { redirectedRequest in
+                capture.record(redirectedRequest)
+            }
+
+            let result = capture.snapshot()
+            XCTAssertEqual(result.callCount, 1, "status=\(status), destination=\(destination)")
+            XCTAssertNil(result.request, "status=\(status), destination=\(destination)")
+            XCTAssertEqual(proposed.httpMethod, "POST")
+            XCTAssertEqual(proposed.httpBody, Data("state-changing-body".utf8))
+        }
+    }
+
     func testClientRejectsHTTPAndPublicBridgeURLsBeforeTransport() throws {
         let transport = RecordingTransport(results: [])
         let credentials = try makeCredentials()
@@ -208,6 +263,53 @@ final class BridgeClientTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), Set(["request", "signature"]))
         let signature = try XCTUnwrap(object["signature"] as? String)
         XCTAssertNoThrow(try RequestSigner.validate(signature: signature))
+    }
+
+    func testSubmitEnvelopeEmbedsTheExactCanonicalBytesUsedByTheSignature() async throws {
+        let request = try BridgeRequest(
+            version: 1,
+            requestID: "req-numbers",
+            deviceID: "iphone-1",
+            issuedAt: "2026-08-28T00:00:00Z",
+            idempotencyKey: "idem-numbers",
+            kind: .chat,
+            payload: [
+                "numbers": .object([
+                    "one": .double(1.0),
+                    "decimal": .double(12.5),
+                    "large": .double(1e20),
+                    "small": .double(1e-7),
+                    "negative_zero": .double(-0.0),
+                ]),
+            ]
+        )
+        let transport = RecordingTransport(results: [
+            .success(try responseResult(for: request.requestID)),
+        ])
+        let client = try BridgeClient(
+            baseURL: XCTUnwrap(URL(string: "https://192.168.1.20:8443")),
+            credentials: makeCredentials(),
+            transport: transport
+        )
+        let canonical = try request.canonicalData()
+        let signature = try RequestSigner.signature(
+            for: request,
+            secret: Data("0123456789abcdef0123456789abcdef".utf8)
+        )
+        _ = try await client.submit(request)
+        let body = try XCTUnwrap((await transport.recordedRequests()).first?.httpBody)
+        let requestPrefix = Data(#"{"request":"#.utf8)
+        let signaturePrefix = Data(",\"signature\":\"".utf8)
+        let signatureSuffix = Data(#""}"#.utf8)
+        let signatureStart = try XCTUnwrap(body.range(of: signaturePrefix))
+        let requestBytes = Data(body[requestPrefix.count ..< signatureStart.lowerBound])
+        let signatureBytes = Data(
+            body[signatureStart.upperBound ..< body.index(body.endIndex, offsetBy: -signatureSuffix.count)]
+        )
+
+        XCTAssertEqual(requestBytes, canonical)
+        XCTAssertEqual(String(decoding: signatureBytes, as: UTF8.self), signature)
+        XCTAssertEqual(canonical, Data(Fixtures.numberCanonicalJSON.utf8))
     }
 
     func testStateChangingTimeoutSendsExactlyOnceAndReturnsResultUnknown() async throws {
@@ -301,6 +403,30 @@ final class BridgeClientTests: XCTestCase {
                 transportFactory: factory
             )
             XCTFail("Malformed pairing credentials must be rejected")
+        } catch {
+            XCTAssertEqual(error as? BridgeError, .invalidPairingResponse)
+        }
+        XCTAssertNil(try store.load())
+        XCTAssertTrue(security.addedItems.isEmpty)
+    }
+
+    func testPairingRejectsUnknownTopLevelPairClaimResponseField() async throws {
+        let security = FakeSecurityItemAccess()
+        let store = KeychainDeviceStore(service: "test.jarvis", security: security)
+        let body = Data(#"{"version":1,"device_id":"paired-iphone","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=","unexpected":true}"#.utf8)
+        let transport = RecordingTransport(results: [
+            .success((body, try httpResponse(status: 201))),
+        ])
+        let factory = RecordingPinnedTransportFactory(transport: transport)
+
+        do {
+            _ = try await BridgeClient.claimPairing(
+                makePairingPayload(),
+                deviceName: "Alice's iPhone",
+                store: store,
+                transportFactory: factory
+            )
+            XCTFail("Pair claim responses with unknown top-level fields must be rejected")
         } catch {
             XCTAssertEqual(error as? BridgeError, .invalidPairingResponse)
         }
@@ -496,5 +622,24 @@ private final class RecordingPinnedTransportFactory: PinnedTransportFactory, @un
     func makeTransport(certificateFingerprint: String) throws -> any BridgeTransport {
         fingerprints.append(certificateFingerprint)
         return transport
+    }
+}
+
+private final class RedirectCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+    private var request: URLRequest?
+
+    func record(_ request: URLRequest?) {
+        lock.lock()
+        defer { lock.unlock() }
+        callCount += 1
+        self.request = request
+    }
+
+    func snapshot() -> (callCount: Int, request: URLRequest?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (callCount, request)
     }
 }

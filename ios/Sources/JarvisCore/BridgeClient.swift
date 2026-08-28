@@ -123,6 +123,16 @@ public final class PinnedCertificateDelegate: NSObject, URLSessionDelegate, @unc
         completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
     func disposition(
         authenticationMethod: String,
         leafCertificateDER: Data?
@@ -343,13 +353,28 @@ public struct BridgeClient: Sendable {
         method: String,
         request: BridgeRequest
     ) throws -> URLRequest {
-        let signature = try RequestSigner.signature(for: request, secret: credentials.secret)
-        let envelope = SignedBridgeRequest(request: request, signature: signature)
+        let canonicalRequestData = try request.canonicalData()
+        let signature = try RequestSigner.signature(
+            for: canonicalRequestData,
+            secret: credentials.secret
+        )
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.httpBody = try JSONEncoder().encode(envelope)
+        urlRequest.httpBody = signedEnvelopeData(
+            requestData: canonicalRequestData,
+            signature: signature
+        )
         return urlRequest
+    }
+
+    private func signedEnvelopeData(requestData: Data, signature: String) -> Data {
+        var envelope = Data(#"{"request":"#.utf8)
+        envelope.append(requestData)
+        envelope.append(Data(",\"signature\":\"".utf8))
+        envelope.append(Data(signature.utf8))
+        envelope.append(Data(#""}"#.utf8))
+        return envelope
     }
 
     private func sendStateChanging(_ request: URLRequest) async throws -> BridgeResponse {
@@ -456,11 +481,6 @@ extension BridgeClient: CustomStringConvertible, CustomDebugStringConvertible {
     public var debugDescription: String { description }
 }
 
-private struct SignedBridgeRequest: Encodable {
-    let request: BridgeRequest
-    let signature: String
-}
-
 private struct PairClaimRequest: Encodable {
     let sessionID: String
     let deviceName: String
@@ -478,10 +498,45 @@ private struct PairClaimResponse: Decodable {
     let deviceID: String
     let deviceSecret: String
 
-    private enum CodingKeys: String, CodingKey {
+    init(from decoder: Decoder) throws {
+        let allFields = try decoder.container(keyedBy: AnyPairClaimCodingKey.self)
+        let unexpected = allFields.allKeys
+            .map(\.stringValue)
+            .filter { !Self.allowedFields.contains($0) }
+            .sorted()
+        guard unexpected.isEmpty else {
+            throw BridgeProtocolError.unknownFields(
+                type: "PairClaimResponse",
+                fields: unexpected
+            )
+        }
+        let container = try decoder.container(keyedBy: PairClaimResponseCodingKey.self)
+        version = try container.decode(Int.self, forKey: .version)
+        deviceID = try container.decode(String.self, forKey: .deviceID)
+        deviceSecret = try container.decode(String.self, forKey: .deviceSecret)
+    }
+
+    private static let allowedFields: Set<String> = ["version", "device_id", "device_secret"]
+
+    private enum PairClaimResponseCodingKey: String, CodingKey {
         case version
         case deviceID = "device_id"
         case deviceSecret = "device_secret"
+    }
+}
+
+private struct AnyPairClaimCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
     }
 }
 

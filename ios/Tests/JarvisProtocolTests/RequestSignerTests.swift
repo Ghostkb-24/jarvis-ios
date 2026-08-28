@@ -16,6 +16,16 @@ final class RequestSignerTests: XCTestCase {
         XCTAssertNoThrow(try RequestSigner.validate(signature: signature))
     }
 
+    func testHMACMatchesPythonFloatingPointFixture() throws {
+        let request = try Fixtures.numberRequest()
+        let secret = Data("0123456789abcdef0123456789abcdef".utf8)
+
+        XCTAssertEqual(
+            try RequestSigner.signature(for: request, secret: secret),
+            "10e5b6f4e96399c9ae514dbd3ca8fbc3e1ab81f901dd3f918ac108be7f5fcc89"
+        )
+    }
+
     func testSignerRejectsSecretsThatAreNotExactly32Bytes() throws {
         let request = try Fixtures.openWeChatRequest()
 

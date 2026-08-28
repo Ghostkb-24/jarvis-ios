@@ -7,6 +7,7 @@ public enum BridgeProtocolError: Error, Equatable, Sendable {
     case invalidSecretLength
     case invalidSignature
     case invalidFingerprint
+    case unknownFields(type: String, fields: [String])
     case unknownEnumValue(type: String, value: String)
 }
 
@@ -25,6 +26,8 @@ extension BridgeProtocolError: LocalizedError {
             "Request signature must be 64 lowercase hexadecimal characters"
         case .invalidFingerprint:
             "Certificate fingerprint must be 64 lowercase hexadecimal characters"
+        case let .unknownFields(type, fields):
+            "Unknown \(type) fields: \(fields.joined(separator: ", "))"
         case let .unknownEnumValue(type, value):
             "Unknown \(type) wire value: \(value)"
         }
@@ -169,6 +172,14 @@ public struct BridgeRequest: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        try validateNoUnknownFields(
+            decoder,
+            type: "BridgeRequest",
+            allowed: [
+                "version", "request_id", "device_id", "issued_at",
+                "idempotency_key", "kind", "payload",
+            ]
+        )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             version: container.decode(Int.self, forKey: .version),
@@ -241,6 +252,11 @@ public struct BridgeResponse: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        try validateNoUnknownFields(
+            decoder,
+            type: "BridgeResponse",
+            allowed: ["version", "request_id", "state", "risk", "payload"]
+        )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             version: container.decode(Int.self, forKey: .version),
@@ -299,6 +315,14 @@ public struct PairingPayload: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        try validateNoUnknownFields(
+            decoder,
+            type: "PairingPayload",
+            allowed: [
+                "version", "bridge_id", "bridge_url", "certificate_sha256",
+                "session_id", "expires_at", "proof",
+            ]
+        )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             version: container.decode(Int.self, forKey: .version),
@@ -319,6 +343,36 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         case sessionID = "session_id"
         case expiresAt = "expires_at"
         case proof
+    }
+}
+
+private struct AnyProtocolCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private func validateNoUnknownFields(
+    _ decoder: Decoder,
+    type: String,
+    allowed: Set<String>
+) throws {
+    let container = try decoder.container(keyedBy: AnyProtocolCodingKey.self)
+    let unexpected = container.allKeys
+        .map(\.stringValue)
+        .filter { !allowed.contains($0) }
+        .sorted()
+    guard unexpected.isEmpty else {
+        throw BridgeProtocolError.unknownFields(type: type, fields: unexpected)
     }
 }
 
