@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from jarvis_assistant.bridge.protocol import BridgeRequest
+from jarvis_assistant.bridge.protocol import BridgeRequest, BridgeResponse, Risk, TaskState
 
 
 def test_bridge_request_canonical_bytes_match_open_wechat_fixture() -> None:
@@ -49,3 +49,17 @@ def test_bridge_request_is_immutable_and_rejects_unknown_fields() -> None:
             payload={},
             unexpected=True,
         )
+
+
+def test_bridge_response_exposes_task_state_and_risk_values() -> None:
+    """Fails if consumers cannot construct a response with the public state/risk contract."""
+    response = BridgeResponse(
+        version=1,
+        request_id="req-1",
+        state=TaskState.AWAITING_CONFIRMATION,
+        risk=Risk.CONFIRMATION_REQUIRED,
+        payload={"target": "wechat", "content": "hello"},
+    )
+
+    assert response.state == "awaiting_confirmation"
+    assert response.risk == "confirmation_required"

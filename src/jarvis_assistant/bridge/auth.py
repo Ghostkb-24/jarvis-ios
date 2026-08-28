@@ -22,6 +22,8 @@ def verify_request(
     now: datetime,
 ) -> None:
     expected_signature = sign_request(secret, request)
+    if not _is_lowercase_hex_signature(signature, len(expected_signature)):
+        raise AuthenticationError("invalid signature")
     if not hmac.compare_digest(expected_signature, signature):
         raise AuthenticationError("invalid signature")
 
@@ -43,3 +45,12 @@ def _parse_utc_timestamp(value: str) -> datetime:
     if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(None):
         raise AuthenticationError("invalid timestamp")
     return timestamp.astimezone(UTC)
+
+
+def _is_lowercase_hex_signature(value: object, expected_length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == expected_length
+        and value.isascii()
+        and all(character in "0123456789abcdef" for character in value)
+    )

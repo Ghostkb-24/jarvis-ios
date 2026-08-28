@@ -75,3 +75,76 @@ All checks passed!
 ## Concerns
 
 - Pydantic's `frozen=True` makes model attributes immutable but, as in Pydantic generally, does not recursively make arbitrary `payload` dictionaries immutable. Signature verification always recomputes canonical bytes, so any post-sign mutation invalidates the prior signature.
+
+## Fix round — malformed signature rejection
+
+### Finding and root cause
+
+The reviewer-reported non-ASCII signature was reproduced with `"é"`. Python's
+`hmac.compare_digest` raises `TypeError` when asked to compare an ASCII digest
+against a non-ASCII string, so malformed untrusted input bypassed the intended
+`AuthenticationError` response.
+
+### Implementation
+
+- Added lowercase hexadecimal signature-shape validation before
+  `hmac.compare_digest`. It requires a string of the expected 64-character,
+  ASCII lowercase-hex form; malformed values now raise
+  `AuthenticationError("invalid signature")`.
+- Kept constant-time `hmac.compare_digest` for valid-format signatures.
+- Added regression coverage for both non-hex and non-ASCII malformed strings.
+- Added the requested public-interface construction/value coverage for
+  `BridgeResponse`, `TaskState`, and `Risk`.
+
+### RED / GREEN evidence
+
+RED command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_auth.py::test_verify_request_rejects_malformed_signature -q
+```
+
+RED output:
+
+```text
+.F
+TypeError: comparing strings with non-ASCII characters is not supported
+1 failed, 1 passed in 0.15s
+```
+
+GREEN command:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge\test_auth.py::test_verify_request_rejects_malformed_signature -q
+```
+
+GREEN output:
+
+```text
+2 passed in 0.09s
+```
+
+### Final verification
+
+Commands:
+
+```powershell
+& 'G:\venv\Scripts\python.exe' -m pytest tests\bridge -q
+& 'G:\venv\Scripts\python.exe' -m pytest -q
+& 'G:\venv\Scripts\python.exe' -m ruff check src tests
+```
+
+Output:
+
+```text
+12 passed in 0.24s
+74 passed in 14.93s
+All checks passed!
+```
+
+### Files changed in this fix round
+
+- `src/jarvis_assistant/bridge/auth.py`
+- `tests/bridge/test_auth.py`
+- `tests/bridge/test_protocol.py`
+- `.superpowers/sdd/2026-08-28-jarvis-ios/task-1-report.md`

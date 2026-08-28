@@ -77,3 +77,12 @@ def test_verify_request_rejects_signature_from_wrong_secret() -> None:
 
     with pytest.raises(AuthenticationError, match="signature"):
         verify_request(SECRET, request, wrong_signature, NOW)
+
+
+@pytest.mark.parametrize("signature", ["not-a-hex-signature", "é"])
+def test_verify_request_rejects_malformed_signature(signature: str) -> None:
+    """Fails if malformed untrusted signature input escapes as a server error."""
+    request = make_request()
+
+    with pytest.raises(AuthenticationError, match="signature"):
+        verify_request(SECRET, request, signature, NOW)
