@@ -13,6 +13,7 @@ dependencies = [
   "pydantic>=2.10,<3",
   "httpx>=0.28,<1",
   "keyring>=25.6,<26",
+  "cryptography>=45,<47",
   "sounddevice>=0.5,<1",
   "faster-whisper>=1.1,<2",
   "huggingface-hub>=0.21,<1",
