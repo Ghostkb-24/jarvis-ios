@@ -502,6 +502,33 @@ async def test_chat_request_dispatches_once_and_persists_response(tmp_path: Path
     assert calls == ["你好"]
 
 
+def test_bridge_audit_settings_and_revoke_writes_share_one_transaction_boundary(
+    tmp_path: Path,
+) -> None:
+    """Regression for cross-component writes on the shared SQLite connection."""
+    service, store, _ = make_service(tmp_path / "state.db")
+    request = bridge_request()
+
+    def submit() -> None:
+        service.submit(request, signed(request))
+
+    def audit() -> None:
+        store.record_audit("set_volume", {"percent": 35}, True, "ok")
+
+    def settings() -> None:
+        store.save_settings(store.load_settings())
+
+    def revoke() -> None:
+        service.device_store.revoke("iphone-1")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(operation) for operation in (submit, audit, settings, revoke)]
+        for future in futures:
+            future.result(timeout=2)
+
+    assert store.list_audit(1)[0].tool_name == "set_volume"
+
+
 @pytest.fixture
 def tmp_file(tmp_path: Path) -> Path:
     return tmp_path / "allowed.txt"

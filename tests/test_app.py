@@ -97,6 +97,9 @@ def test_mobile_server_stops_and_joins_before_sqlite_closes(qtbot, tmp_path) -> 
         def start(self) -> None:
             events.append("start")
 
+        def request_stop(self) -> None:
+            events.append("stop_requested")
+
         def stop_and_join(self, timeout: float | None = None) -> None:
             del timeout
             events.append("server_stopped")
@@ -116,7 +119,8 @@ def test_mobile_server_stops_and_joins_before_sqlite_closes(qtbot, tmp_path) -> 
     runtime.store.close = record_close
     runtime.shutdown()
 
-    assert events == ["start", "server_stopped", "sqlite_closed"]
+    qtbot.waitUntil(lambda: runtime.closed)
+    assert events == ["start", "stop_requested", "server_stopped", "sqlite_closed"]
 
 
 def test_stop_mobile_connection_runs_off_qt_thread(qtbot, tmp_path) -> None:
@@ -126,6 +130,9 @@ def test_stop_mobile_connection_runs_off_qt_thread(qtbot, tmp_path) -> None:
     class RecordingMobileServer:
         def start(self) -> None:
             calls.append("start")
+
+        def request_stop(self) -> None:
+            return
 
         def stop_and_join(self, timeout: float | None = None) -> None:
             del timeout
@@ -159,6 +166,9 @@ def test_shutdown_waits_for_an_inflight_mobile_stop_before_closing_sqlite(
         def start(self) -> None:
             events.append("start")
 
+        def request_stop(self) -> None:
+            return
+
         def stop_and_join(self, timeout: float | None = None) -> None:
             nonlocal stop_calls
             del timeout
@@ -187,6 +197,8 @@ def test_shutdown_waits_for_an_inflight_mobile_stop_before_closing_sqlite(
     assert first_stop_started.wait(timeout=2)
     runtime.shutdown()
     release_first_stop.set()
+
+    qtbot.waitUntil(lambda: runtime.closed)
 
     assert events.index("server_stopped") < events.index("sqlite_closed")
 
