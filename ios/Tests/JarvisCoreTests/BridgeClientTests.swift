@@ -185,6 +185,52 @@ final class BridgeClientTests: XCTestCase {
         }
     }
 
+    func testPinnedDelegateTaskConformanceStopsRegisteredSessionFromFollowing307And308POSTRedirects() async throws {
+        let delegate = try PinnedCertificateDelegate(
+            fingerprint: String(repeating: "00", count: 32)
+        )
+        let taskDelegate: any URLSessionTaskDelegate = delegate
+        XCTAssertTrue(taskDelegate is PinnedCertificateDelegate)
+
+        let originalURL = try XCTUnwrap(
+            URL(string: "https://192.168.1.20:8443/v1/requests")
+        )
+        let cases = [
+            (307, "http://192.168.1.20:8443/v1/requests"),
+            (307, "https://8.8.8.8:8443/v1/requests"),
+            (307, "https://192.168.1.21:8443/v1/requests"),
+            (308, "http://192.168.1.20:8443/v1/requests"),
+            (308, "https://8.8.8.8:8443/v1/requests"),
+            (308, "https://192.168.1.21:8443/v1/requests"),
+        ]
+
+        for (status, destination) in cases {
+            RedirectingURLProtocol.reset(
+                statusCode: status,
+                redirectURL: try XCTUnwrap(URL(string: destination))
+            )
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RedirectingURLProtocol.self]
+            let session = URLSession(
+                configuration: configuration,
+                delegate: delegate,
+                delegateQueue: nil
+            )
+            defer { session.invalidateAndCancel() }
+            var request = URLRequest(url: originalURL)
+            request.httpMethod = "POST"
+            request.httpBody = Data("state-changing-body".utf8)
+
+            _ = try? await session.data(for: request)
+
+            let requests = RedirectingURLProtocol.recordedRequests()
+            XCTAssertEqual(requests.count, 1, "status=\(status), destination=\(destination)")
+            XCTAssertEqual(requests.first?.url, originalURL)
+            XCTAssertEqual(requests.first?.httpMethod, "POST")
+            XCTAssertEqual(requests.first?.httpBody, Data("state-changing-body".utf8))
+        }
+    }
+
     func testClientRejectsHTTPAndPublicBridgeURLsBeforeTransport() throws {
         let transport = RecordingTransport(results: [])
         let credentials = try makeCredentials()
@@ -641,5 +687,90 @@ private final class RedirectCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (callCount, request)
+    }
+}
+
+private final class RedirectingURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let capture = RedirectRequestCapture()
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let scheme = request.url?.scheme?.lowercased() else { return false }
+        return scheme == "https" || scheme == "http"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.capture.record(request)
+        guard
+            let sourceURL = request.url,
+            let configuration = Self.capture.configuration()
+        else {
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        var redirectedRequest = URLRequest(url: configuration.redirectURL)
+        redirectedRequest.httpMethod = request.httpMethod
+        redirectedRequest.httpBody = request.httpBody
+        let response = HTTPURLResponse(
+            url: sourceURL,
+            statusCode: configuration.statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Location": configuration.redirectURL.absoluteString]
+        )
+        if let response {
+            client?.urlProtocol(
+                self,
+                wasRedirectedTo: redirectedRequest,
+                redirectResponse: response
+            )
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    static func reset(statusCode: Int, redirectURL: URL) {
+        capture.reset(statusCode: statusCode, redirectURL: redirectURL)
+    }
+
+    static func recordedRequests() -> [URLRequest] {
+        capture.requests()
+    }
+}
+
+private final class RedirectRequestCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var statusCode: Int?
+    private var redirectURL: URL?
+    private var requests: [URLRequest] = []
+
+    func reset(statusCode: Int, redirectURL: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.statusCode = statusCode
+        self.redirectURL = redirectURL
+        requests = []
+    }
+
+    func record(_ request: URLRequest) {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append(request)
+    }
+
+    func configuration() -> (statusCode: Int, redirectURL: URL)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let statusCode, let redirectURL else { return nil }
+        return (statusCode, redirectURL)
+    }
+
+    func requests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
     }
 }

@@ -85,7 +85,7 @@ public struct URLSessionPinnedTransportFactory: PinnedTransportFactory {
     }
 }
 
-public final class PinnedCertificateDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+public final class PinnedCertificateDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let fingerprint: String
 
     public init(fingerprint: String) throws {
