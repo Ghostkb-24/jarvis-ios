@@ -9,3 +9,20 @@ dist/
 build/
 *.spec.tmp
 *.db
+
+# XcodeGen/Xcode output and local CI diagnostics
+ios/JarvisIOS.xcodeproj/
+ios/build/
+ios/DerivedData/
+*.xcresult/
+*.xcresult
+*.ipa
+*.dSYM.zip
+
+# Local iOS signing exports and App Store Connect private keys
+AuthKey_*.p8
+*.mobileprovision
+*.p12
+*.cer
+ios/ExportOptions.plist
+ios/Signing/

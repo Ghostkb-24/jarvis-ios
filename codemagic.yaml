@@ -1,0 +1,123 @@
+workflows:
+  ios_unsigned:
+    name: iOS unsigned tests
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: '*'
+          include: true
+          source: true
+    scripts:
+      - name: Install XcodeGen
+        script: |
+          brew install xcodegen
+          xcodegen version
+      - name: Generate Xcode project
+        script: |
+          cd "$CM_BUILD_DIR/ios"
+          xcodegen generate
+      - name: Verify generated iOS project
+        script: |
+          bash "$CM_BUILD_DIR/scripts/ci/verify-ios-project.sh"
+      - name: Run Swift package tests
+        script: |
+          cd "$CM_BUILD_DIR/ios"
+          swift test
+      - name: Run unsigned simulator tests and export reports
+        script: |
+          set -uo pipefail
+          results_dir="$CM_BUILD_DIR/build/test-results"
+          result_bundle="$results_dir/JarvisIOS.xcresult"
+          junit_dir="$results_dir/junit"
+          mkdir -p "$results_dir" "$junit_dir"
+
+          set +e
+          xcodebuild test \
+            -project "$CM_BUILD_DIR/ios/JarvisIOS.xcodeproj" \
+            -scheme JarvisIOS \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -derivedDataPath "$CM_BUILD_DIR/build/DerivedData" \
+            -resultBundlePath "$result_bundle" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+          test_status=$?
+          set -e
+
+          junit_status=0
+          if [ -d "$result_bundle" ]; then
+            xcode-project junit-test-results \
+              --xcresult "$result_bundle" \
+              --output-dir "$junit_dir" || junit_status=$?
+          else
+            printf 'No XCResult bundle was created; JUnit conversion was skipped.\n' >&2
+            junit_status=1
+          fi
+
+          if [ "$test_status" -ne 0 ]; then
+            exit "$test_status"
+          fi
+          exit "$junit_status"
+        test_report: build/test-results/junit/**/*.xml
+    artifacts:
+      - build/test-results/**/*.xcresult
+      - build/test-results/junit/**/*.xml
+      - build/DerivedData/Logs/Test/**/*.xcresult
+
+  ios_testflight:
+    name: iOS TestFlight internal (manual opt-in)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    inputs:
+      submit_to_testflight:
+        description: Set to true only for an approved signed internal TestFlight upload.
+        type: boolean
+        default: false
+    when:
+      condition: ${{ inputs.submit_to_testflight }}
+    integrations:
+      app_store_connect: jarvis_app_store_connect
+    environment:
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.jarvisassistant.ios
+    scripts:
+      - name: Confirm explicit TestFlight opt-in
+        script: |
+          if [ "${{ inputs.submit_to_testflight }}" != "true" ]; then
+            printf 'Refusing signed build: start this workflow with submit_to_testflight=true.\n' >&2
+            exit 1
+          fi
+      - name: Install XcodeGen
+        script: |
+          brew install xcodegen
+          xcodegen version
+      - name: Generate and verify Xcode project
+        script: |
+          cd "$CM_BUILD_DIR/ios"
+          xcodegen generate
+          bash "$CM_BUILD_DIR/scripts/ci/verify-ios-project.sh"
+      - name: Fetch managed signing files
+        script: |
+          xcode-project use-profiles
+      - name: Build signed IPA for TestFlight
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/ios/JarvisIOS.xcodeproj" \
+            --scheme JarvisIOS
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: ${{ inputs.submit_to_testflight }}
+        beta_groups:
+          - Jarvis Internal
