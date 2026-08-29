@@ -528,7 +528,7 @@ public final class AppModel: ObservableObject {
     private func beginVoiceStart(with speechSession: SpeechSession) {
         voiceGeneration &+= 1
         let generation = voiceGeneration
-        voiceAutoSubmissionGeneration = isConnected ? generation : nil
+        voiceAutoSubmissionGeneration = isConnected && client != nil ? generation : nil
         isRequestingSpeechPermission = true
         notice = "正在请求麦克风和语音识别权限"
 
@@ -569,6 +569,8 @@ public final class AppModel: ObservableObject {
             composerText = result.text
             if result.requiresReview {
                 notice = "识别结果需要确认，编辑后再发送"
+            } else if client == nil {
+                notice = "语音已保存为草稿，当前无法发送"
             } else if isConnected {
                 notice = "语音已保存为草稿，请确认后发送"
             } else {
@@ -583,7 +585,17 @@ public final class AppModel: ObservableObject {
             return
         }
         notice = nil
-        _ = submit(text: executableText)
+        guard submit(text: executableText) else {
+            composerText = executableText
+            if !isConnected {
+                notice = "电脑离线，语音已保存为草稿，未发送"
+            } else if let failureNotice = notice, !failureNotice.isEmpty {
+                notice = "\(failureNotice)，语音已保存为草稿"
+            } else {
+                notice = "语音已保存为草稿，当前无法发送"
+            }
+            return
+        }
     }
 
     private func receiveSpeechFailure(

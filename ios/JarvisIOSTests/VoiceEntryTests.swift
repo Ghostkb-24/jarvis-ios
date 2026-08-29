@@ -106,6 +106,95 @@ final class VoiceEntryTests: XCTestCase {
     }
 
     @MainActor
+    func testConnectedWithoutClientKeepsHighConfidenceTranscriptAsDraft() async {
+        let session = SpeechSession(
+            recognizer: VoiceTestRecognizer(
+                result: .init(text: "保留这条语音", confidence: 0.96)
+            ),
+            audioCapture: VoiceTestAudioCapture(),
+            permissionAuthorizer: VoiceTestPermissionAuthorizer(status: .authorized)
+        )
+        let model = AppModel(
+            phase: .idle,
+            device: connectedDevice,
+            speechSession: session
+        )
+
+        model.toggleVoice()
+        let didStartListening = await waitUntil { model.phase == .listening }
+        XCTAssertTrue(didStartListening)
+        model.toggleVoice()
+        let didKeepDraft = await waitUntil {
+            model.phase == .idle && model.composerText == "保留这条语音"
+        }
+
+        XCTAssertTrue(didKeepDraft)
+        XCTAssertEqual(model.notice, "语音已保存为草稿，当前无法发送")
+    }
+
+    @MainActor
+    func testFailedAutoSubmitRestoresExecutableTranscriptToComposer() async {
+        let client = RecordingVoiceBridgeClient()
+        let session = SpeechSession(
+            recognizer: VoiceTestRecognizer(
+                result: .init(text: "不要丢失这条语音", confidence: 0.97)
+            ),
+            audioCapture: VoiceTestAudioCapture(),
+            permissionAuthorizer: VoiceTestPermissionAuthorizer(status: .authorized)
+        )
+        let model = AppModel(
+            client: client,
+            deviceID: "",
+            phase: .idle,
+            device: connectedDevice,
+            speechSession: session
+        )
+
+        model.toggleVoice()
+        let didStartListening = await waitUntil { model.phase == .listening }
+        XCTAssertTrue(didStartListening)
+        model.toggleVoice()
+        let didRestoreDraft = await waitUntil {
+            model.phase == .idle && model.composerText == "不要丢失这条语音"
+        }
+
+        XCTAssertTrue(didRestoreDraft)
+        XCTAssertEqual(model.notice, "无法创建安全请求，语音已保存为草稿")
+        let submitCount = await client.submitCount()
+        XCTAssertEqual(submitCount, 0)
+    }
+
+    @MainActor
+    func testOfflineVoiceReconnectDuringCaptureStillDoesNotAutoSubmit() async {
+        let client = RecordingVoiceBridgeClient()
+        let session = SpeechSession(
+            recognizer: VoiceTestRecognizer(
+                result: .init(text: "重连后仍然保留", confidence: 0.98)
+            ),
+            audioCapture: VoiceTestAudioCapture(),
+            permissionAuthorizer: VoiceTestPermissionAuthorizer(status: .authorized)
+        )
+        let model = AppModel(
+            client: client,
+            speechSession: session
+        )
+
+        model.toggleVoice()
+        let didStartListening = await waitUntil { model.phase == .listening }
+        XCTAssertTrue(didStartListening)
+        model.updateConnection(connectedDevice)
+        model.toggleVoice()
+        let didKeepDraft = await waitUntil {
+            model.phase == .idle && model.composerText == "重连后仍然保留"
+        }
+
+        XCTAssertTrue(didKeepDraft)
+        XCTAssertEqual(model.notice, "语音已保存为草稿，请确认后发送")
+        let submitCount = await client.submitCount()
+        XCTAssertEqual(submitCount, 0)
+    }
+
+    @MainActor
     func testResignActiveStopsListeningWithoutSubmittingTranscript() async throws {
         let client = RecordingVoiceBridgeClient()
         let audio = VoiceTestAudioCapture()
