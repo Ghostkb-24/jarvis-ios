@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "JarvisProtocol", targets: ["JarvisProtocol"]),
         .library(name: "JarvisCore", targets: ["JarvisCore"]),
+        .library(name: "JarvisVoice", targets: ["JarvisVoice"]),
     ],
     targets: [
         .target(name: "JarvisProtocol"),
@@ -18,13 +19,19 @@ let package = Package(
             name: "JarvisCore",
             dependencies: ["JarvisProtocol"]
         ),
+        .target(
+            name: "JarvisVoice",
+            path: "JarvisIOS/Voice",
+            exclude: ["SpeechPermissionView.swift"],
+            sources: ["SpeechSession.swift"]
+        ),
         .testTarget(
             name: "JarvisProtocolTests",
             dependencies: ["JarvisProtocol"]
         ),
         .testTarget(
             name: "JarvisCoreTests",
-            dependencies: ["JarvisCore", "JarvisProtocol"]
+            dependencies: ["JarvisCore", "JarvisProtocol", "JarvisVoice"]
         ),
     ]
 )

@@ -18,6 +18,7 @@ struct JarvisIOSApp: App {
 }
 private struct RootTabView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView(selection: $model.selectedTab) {
@@ -47,6 +48,17 @@ private struct RootTabView: View {
                 onAllow: { model.allow(preview) }
             )
             .interactiveDismissDisabled()
+        }
+        .onOpenURL(perform: model.open)
+        .onAppear(perform: model.consumeListeningEntryIfNeeded)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .inactive {
+                model.appWillResignActive()
+            } else if phase == .active {
+                model.consumeListeningEntryIfNeeded()
+            } else if phase == .background {
+                model.appDidEnterBackground()
+            }
         }
     }
 

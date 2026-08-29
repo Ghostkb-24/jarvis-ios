@@ -64,8 +64,12 @@ struct ConversationView: View {
     private var voiceCore: some View {
         VStack(spacing: 2) {
             VoiceOrb(phase: model.phase, action: model.toggleVoice)
-                .disabled(model.phase.blocksCompetingInput)
-                .opacity(model.phase.blocksCompetingInput ? 0.66 : 1)
+                .disabled(model.phase.blocksCompetingInput || model.isRequestingSpeechPermission)
+                .opacity(
+                    model.phase.blocksCompetingInput || model.isRequestingSpeechPermission
+                        ? 0.66
+                        : 1
+                )
 
             Text(model.phase.title)
                 .font(.title3.weight(.semibold))
@@ -83,6 +87,11 @@ struct ConversationView: View {
                     .foregroundStyle(JarvisTheme.warning)
                     .multilineTextAlignment(.center)
                     .padding(.top, 6)
+            }
+
+            if model.speechPermissionStatus.needsSettings {
+                SpeechPermissionView(status: model.speechPermissionStatus)
+                    .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity)
@@ -156,7 +165,7 @@ struct ConversationView: View {
             .accessibilityLabel("发送消息")
         }
         .accessibilityIdentifier("composer")
-        .disabled(model.phase.blocksCompetingInput)
+        .disabled(model.phase.blocksCompetingInput || model.isRequestingSpeechPermission)
     }
 
     private func sectionTitle(_ title: String) -> some View {

@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import JarvisCore
 import JarvisProtocol
+import WidgetKit
 
 protocol JarvisBridgeClient: Sendable {
     func submit(_ request: BridgeRequest) async throws -> BridgeResponse
@@ -77,6 +78,32 @@ enum AppTab: Hashable, Sendable {
     case conversation
     case tasks
     case devices
+}
+
+protocol WidgetSnapshotWriting {
+    func save(_ device: DeviceSnapshot)
+}
+
+struct AppGroupWidgetSnapshotWriter: WidgetSnapshotWriting {
+    static let suiteName = "group.com.jarvisassistant.shared"
+    static let snapshotKey = "jarvis.widget.status.v1"
+
+    private struct StatusSnapshot: Codable {
+        let connectionStatus: String
+        let modelStatus: String
+        let updatedAt: Date
+    }
+
+    func save(_ device: DeviceSnapshot) {
+        let snapshot = StatusSnapshot(
+            connectionStatus: device.isConnected ? "connected" : "offline",
+            modelStatus: device.modelStatus,
+            updatedAt: Date()
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults(suiteName: Self.suiteName)?.set(data, forKey: Self.snapshotKey)
+        WidgetCenter.shared.reloadTimelines(ofKind: "com.jarvisassistant.ios.widget.status")
+    }
 }
 
 public enum RemoteToolProposal: Equatable, Sendable {
@@ -194,6 +221,7 @@ public final class AppModel: ObservableObject {
             switch (self, next) {
             case (.offline, .idle),
                  (.idle, .listening),
+                 (.idle, .failed),
                  (.idle, .thinking),
                  (.listening, .transcribing),
                  (.listening, .idle),
@@ -238,13 +266,18 @@ public final class AppModel: ObservableObject {
     @Published private(set) var device: DeviceSnapshot
     @Published private(set) var notice: String?
     @Published private(set) var testingClientCallCount = 0
+    @Published private(set) var speechPermissionStatus: SpeechPermissionStatus = .undetermined
+    @Published private(set) var isRequestingSpeechPermission = false
 
     let isUITesting: Bool
 
     private let client: (any JarvisBridgeClient)?
     private let deviceID: String
+    private let speechSession: SpeechSession?
+    private let widgetSnapshotWriter: (any WidgetSnapshotWriting)?
     private var operationGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
+    private var voiceGeneration: UInt64 = 0
 
     init(
         client: (any JarvisBridgeClient)? = nil,
@@ -253,7 +286,9 @@ public final class AppModel: ObservableObject {
         messages: [ConversationMessage] = [],
         tasks: [JarvisTaskSummary] = [],
         device: DeviceSnapshot = .offline,
-        isUITesting: Bool = false
+        isUITesting: Bool = false,
+        speechSession: SpeechSession? = nil,
+        widgetSnapshotWriter: (any WidgetSnapshotWriting)? = nil
     ) {
         self.client = client
         self.deviceID = deviceID
@@ -262,6 +297,10 @@ public final class AppModel: ObservableObject {
         self.tasks = tasks
         self.device = device
         self.isUITesting = isUITesting
+        self.speechSession = speechSession
+        self.widgetSnapshotWriter = widgetSnapshotWriter
+        speechPermissionStatus = speechSession?.permissionStatus ?? .undetermined
+        widgetSnapshotWriter?.save(device)
     }
 
     var isConnected: Bool { device.isConnected }
@@ -274,7 +313,10 @@ public final class AppModel: ObservableObject {
     static func launchConfigured(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppModel {
         let isUITesting = arguments.contains("-ui-testing")
         guard isUITesting else {
-            return AppModel()
+            return AppModel(
+                speechSession: SpeechSession(),
+                widgetSnapshotWriter: AppGroupWidgetSnapshotWriter()
+            )
         }
 
         let fixture = fixtureName(in: arguments)
@@ -354,6 +396,7 @@ public final class AppModel: ObservableObject {
 
     func updateConnection(_ snapshot: DeviceSnapshot) {
         device = snapshot
+        widgetSnapshotWriter?.save(snapshot)
         if snapshot.isConnected {
             if phase == .offline {
                 _ = transition(to: .idle)
@@ -361,12 +404,100 @@ public final class AppModel: ObservableObject {
             }
         } else {
             invalidateActiveOperation()
+            stopVoiceWithoutSubmission()
             _ = transition(to: .offline)
             notice = "电脑连接已断开，进行中的响应将被忽略"
         }
     }
 
     func toggleVoice() {
+        guard let speechSession else {
+            toggleFixtureVoice()
+            return
+        }
+
+        if isRequestingSpeechPermission {
+            notice = "正在等待麦克风和语音识别权限"
+            return
+        }
+
+        switch phase {
+        case .listening:
+            notice = nil
+            guard transition(to: .transcribing) else { return }
+            let generation = voiceGeneration
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let result = try await speechSession.stopResult()
+                    self.applySpeechResult(result, ownedBy: generation)
+                } catch {
+                    self.receiveSpeechFailure(error, ownedBy: generation)
+                }
+            }
+        case .offline:
+            notice = "电脑离线，语音草稿不会自动发送"
+        case .thinking, .awaitingConfirmation, .executing:
+            notice = "当前请求尚未结束，请先处理当前状态"
+        default:
+            guard phase.acceptsNewOperation else {
+                notice = "当前状态无法开始语音输入"
+                return
+            }
+            beginVoiceStart(with: speechSession)
+        }
+    }
+
+    func open(url: URL) {
+        guard
+            url.scheme?.lowercased() == "jarvis",
+            url.host?.lowercased() == "listen"
+        else {
+            return
+        }
+        prepareListeningEntry()
+    }
+
+    func consumeListeningEntryIfNeeded() {
+        guard ListeningEntryStore.consumeListeningEntry() else { return }
+        prepareListeningEntry()
+    }
+
+    private func prepareListeningEntry() {
+        selectedTab = .conversation
+        notice = "语音入口已就绪，点击开始说话"
+    }
+
+    func appWillResignActive() {
+        let wasVoiceActive = phase == .listening || phase == .transcribing
+        if wasVoiceActive {
+            voiceGeneration &+= 1
+        }
+        speechSession?.appWillResignActive()
+        if wasVoiceActive {
+            if phase != .idle {
+                _ = transition(to: .idle)
+            }
+            notice = "应用离开前台，录音已停止"
+        }
+    }
+
+    func appDidEnterBackground() {
+        let hadPendingVoice = isRequestingSpeechPermission
+            || phase == .listening
+            || phase == .transcribing
+        voiceGeneration &+= 1
+        isRequestingSpeechPermission = false
+        speechSession?.cancel()
+        if phase == .listening || phase == .transcribing {
+            _ = transition(to: .idle)
+        }
+        if hadPendingVoice {
+            notice = "应用进入后台，语音输入已停止"
+        }
+    }
+
+    private func toggleFixtureVoice() {
         switch phase {
         case .listening:
             notice = nil
@@ -384,6 +515,88 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    private func beginVoiceStart(with speechSession: SpeechSession) {
+        voiceGeneration &+= 1
+        let generation = voiceGeneration
+        isRequestingSpeechPermission = true
+        notice = "正在请求麦克风和语音识别权限"
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await speechSession.start()
+                guard generation == self.voiceGeneration else {
+                    speechSession.appWillResignActive()
+                    return
+                }
+                self.isRequestingSpeechPermission = false
+                self.speechPermissionStatus = speechSession.permissionStatus
+                guard self.transition(to: .listening) else {
+                    speechSession.appWillResignActive()
+                    self.notice = "当前状态无法开始语音输入"
+                    return
+                }
+                self.notice = nil
+            } catch {
+                self.receiveSpeechFailure(error, ownedBy: generation)
+            }
+        }
+    }
+
+    private func applySpeechResult(
+        _ result: SpeechTranscriptResult,
+        ownedBy generation: UInt64
+    ) {
+        guard generation == voiceGeneration else { return }
+        speechPermissionStatus = speechSession?.permissionStatus ?? speechPermissionStatus
+        guard transition(to: .idle) else { return }
+
+        guard let executableText = result.executableText else {
+            composerText = result.text
+            notice = "识别结果需要确认，编辑后再发送"
+            return
+        }
+        notice = nil
+        _ = submit(text: executableText)
+    }
+
+    private func receiveSpeechFailure(
+        _ error: any Error,
+        ownedBy generation: UInt64
+    ) {
+        guard generation == voiceGeneration else { return }
+        isRequestingSpeechPermission = false
+        speechPermissionStatus = speechSession?.permissionStatus ?? speechPermissionStatus
+        if phase != .idle {
+            _ = transition(to: .idle)
+        }
+        _ = transition(to: .failed)
+
+        switch error as? SpeechSessionFailure {
+        case .permissionDenied:
+            notice = "需要麦克风和语音识别权限才能开始"
+        case .emptyTranscript:
+            notice = "没有识别到语音，请重试"
+        case .interrupted:
+            notice = "录音已停止"
+        default:
+            notice = "语音识别失败，未发送任何内容"
+        }
+    }
+
+    private func stopVoiceWithoutSubmission() {
+        guard
+            isRequestingSpeechPermission
+                || phase == .listening
+                || phase == .transcribing
+        else {
+            return
+        }
+        voiceGeneration &+= 1
+        isRequestingSpeechPermission = false
+        speechSession?.cancel()
+    }
+
     func submitComposer() {
         let text = composerText
         if submit(text: text) {
@@ -395,6 +608,10 @@ public final class AppModel: ObservableObject {
     public func submit(text: String) -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return false }
+        guard !isRequestingSpeechPermission else {
+            notice = "请先完成语音权限选择"
+            return false
+        }
         guard phase.acceptsNewOperation else {
             notice = "当前请求尚未结束，请先处理当前状态"
             return false
@@ -424,6 +641,10 @@ public final class AppModel: ObservableObject {
 
     @discardableResult
     public func submit(proposal: RemoteToolProposal) -> Bool {
+        guard !isRequestingSpeechPermission else {
+            notice = "请先完成语音权限选择"
+            return false
+        }
         guard phase.acceptsNewOperation else {
             notice = "当前请求尚未结束，请先处理当前状态"
             return false

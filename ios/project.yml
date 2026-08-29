@@ -16,19 +16,52 @@ targets:
     platform: iOS
     sources:
       - path: JarvisIOS
+      - path: JarvisIntents
     dependencies:
       - package: JarvisShared
         product: JarvisCore
       - package: JarvisShared
         product: JarvisProtocol
+      - target: JarvisWidget
+        embed: true
+    info:
+      path: JarvisIOS/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis
+        CFBundleURLTypes:
+          - CFBundleURLName: com.jarvisassistant.ios.listen
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - jarvis
+        NSMicrophoneUsageDescription: Jarvis 只在你明确开始语音输入后使用麦克风。
+        NSSpeechRecognitionUsageDescription: Jarvis 使用语音识别把你主动录制的语音转换为可见文本。
+        UILaunchScreen: {}
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jarvisassistant.ios
         PRODUCT_NAME: Jarvis
         PRODUCT_MODULE_NAME: JarvisIOS
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        CODE_SIGN_ENTITLEMENTS: JarvisIOS/JarvisIOS.entitlements
+        CODE_SIGN_STYLE: Automatic
+  JarvisWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: JarvisWidget
+      - path: JarvisIntents/StartJarvisIntent.swift
+    info:
+      path: JarvisWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarvisassistant.ios.widget
+        PRODUCT_MODULE_NAME: JarvisWidgetExtension
+        CODE_SIGN_ENTITLEMENTS: JarvisWidget/JarvisWidget.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
         CODE_SIGN_STYLE: Automatic
   JarvisIOSUITests:
     type: bundle.ui-testing
