@@ -13,6 +13,11 @@ Implementation commit:
 `a2a20f92923532ad90c1d34a11136ce76928c896`
 (`feat: add Jarvis voice and iOS entry points`).
 
+Static review round 1 fix commit:
+`474736e` (`fix: harden Jarvis offline voice lifecycle`). All three Important
+findings in `task-6-review-round-1.md` are addressed in source and regression
+tests; executable Swift/Xcode validation remains part of the open cloud gate.
+
 The SDD progress ledger was not changed. No Task 7 Codemagic configuration or
 Task 8 integration/acceptance work was created.
 
@@ -33,6 +38,7 @@ Task 8 integration/acceptance work was created.
 - Modified `ios/JarvisIOS/Conversation/ConversationView.swift`
 - Modified `ios/Package.swift`
 - Modified `ios/project.yml`
+- `tests/test_ios_project_config.py`
 
 ## Voice and lifecycle decisions
 
@@ -61,11 +67,19 @@ Task 8 integration/acceptance work was created.
 - `SpeechSession` and `AppModel` both expose visible
   listening/transcribing/review/error state. Competing text and tool requests
   are also blocked while a permission decision is pending.
-- Resign-active stops `AVAudioEngine`, removes its tap, deactivates the audio
-  session, cancels recognition, and invalidates the AppModel voice generation.
-  Entering background also cancels an outstanding permission/start task so a
-  grant cannot cause recording to begin while the app is hidden. A system
-  permission sheet's transient inactive phase does not itself start audio.
+- Resign-active now invalidates both `SpeechSession` and `AppModel` generations
+  while permission is still pending as well as while recording/transcribing.
+  Permission completion re-checks ownership before recognizer preparation or
+  audio start. Entering background uses the same no-hidden-recording safety
+  boundary. If a permission sheet makes the scene inactive, the pending start
+  is cancelled and the user must explicitly tap again after returning active.
+- Local speech capture is independent of the Windows computer connection.
+  From the production-default offline model, `jarvis://listen` still only
+  readies the conversation screen; a subsequent explicit voice tap may request
+  permission and record. Its transcript is stored in the composer and never
+  auto-submitted. The start generation records whether auto-submission was
+  eligible, so reconnecting midway cannot upgrade an offline recording into an
+  automatic Bridge request.
 
 ## Siri, Action button, and deep-link decisions
 
@@ -79,7 +93,8 @@ Task 8 integration/acceptance work was created.
   button.
 - The app registers and validates only `jarvis://listen`. Invalid scheme/host
   combinations are ignored. Home and lock-screen Widget families use that URL
-  as their `widgetURL`.
+  as their `widgetURL`. The deep link itself never requests permission or starts
+  audio, including on the production-default offline model.
 - Apple's `OpenURLIntent` and URL-representation APIs require universal links
   and explicitly reject custom URL schemes. Therefore the iOS 18 Control
   Widget uses Apple's documented `OpenIntent + AppEnum` launch path and the
@@ -105,7 +120,12 @@ Task 8 integration/acceptance work was created.
   private key, or signing secret was added.
 - XcodeGen now defines the Widget extension, embeds it in the app, gives the
   intent source target membership in both app and Widget, registers the custom
-  URL scheme, and supplies microphone/speech privacy descriptions.
+  URL scheme, supplies microphone/speech privacy descriptions, and emits an
+  explicit `UIApplicationSceneManifest` with multiple scenes disabled for the
+  SwiftUI `scenePhase` lifecycle path.
+- `tests/test_ios_project_config.py` statically asserts the scene manifest,
+  custom URL scheme, both voice privacy descriptions, and the resign-active
+  scenePhase wiring. It uses only the Python standard library.
 - `Package.swift` exposes a `JarvisVoice` library from the production
   `SpeechSession.swift` file so `swift test` exercises the same implementation
   as the app rather than a duplicate test copy.
@@ -119,7 +139,7 @@ RED command then stopped before test discovery because `swift` is not
 installed on this Windows host. Executable RED/GREEN and compilation evidence
 is deferred rather than fabricated.
 
-There are 8 package speech tests:
+There are 9 package speech tests:
 
 1. Initialization does not request permission or start audio.
 2. Explicit start requests undetermined permission and enters listening.
@@ -130,13 +150,27 @@ There are 8 package speech tests:
    low-confidence execution.
 7. Resign-active stops audio, cancels recognition, and marks interruption.
 8. Recognition failure still releases audio and exposes a visible failure.
+9. A suspended fake authorizer resolved after resign-active never prepares the
+   recognizer or starts the fake audio capture.
 
-There are 3 app-target voice-entry tests:
+There are 5 app-target voice-entry tests:
 
 1. Low-confidence speech becomes a composer draft and never calls Bridge.
 2. `jarvis://listen` prepares the conversation tab without requesting
    permission or starting audio.
 3. Resign-active stops listening and submits no transcript.
+4. A real default-offline `AppModel`, entered through `jarvis://listen`, starts
+   capture only after an explicit tap and saves a high-confidence local draft
+   without calling Bridge.
+5. Resign-active while the app-level permission request is suspended clears
+   the pending UI state and never starts recording.
+
+For round 1, the durable Info.plist regression was written before the manifest.
+`py -3.12 -m pytest tests/test_ios_project_config.py -q` failed on the missing
+`UIApplicationSceneManifest`, then passed after the XcodeGen property was
+added. The two new Swift race/behavior regressions were likewise written before
+their production changes, but executable RED/GREEN remains unavailable because
+this Windows host has no `swift` command.
 
 ## Local commands and results
 
@@ -153,6 +187,12 @@ All commands ran from
 | Production Task 6 scan for `fatalError`, `try!`, force casts, logging, and Widget secret/fingerprint/proof/signature fields | No findings. |
 | `git diff --check` and `git diff --cached --check` before source commit | Passed; only line-ending conversion notices were printed. |
 | `git show --check --oneline --stat a2a20f9` | Passed with no whitespace errors. |
+| Round 1 config RED: `py -3.12 -m pytest tests/test_ios_project_config.py -q` before manifest | `1 failed`: missing `UIApplicationSceneManifest`. |
+| Round 1 config GREEN: the same targeted pytest after manifest | `1 passed in 0.01s`. |
+| Round 1 full regression: `$env:PYTHONPATH='src'; py -3.12 -m pytest -q` | `185 passed in 12.94s`. |
+| Round 1 `py -3.12 -m ruff check src tests` | `All checks passed!`. |
+| Round 1 Swift delimiter/config/privacy static gate | Passed for 4 changed Swift files; parsed XcodeGen scene/URL/privacy values; Widget secret-field scan clean. |
+| `git diff --cached --check` before round 1 source commit | Passed; only line-ending conversion notices were printed. |
 | `cd ios; swift test` after implementation | Exit 1: `swift` is not recognized. No Swift test pass is claimed. |
 | `cd ios; xcodegen generate` | Exit 1: `xcodegen` is not recognized. XcodeGen schema acceptance is not claimed. |
 | Task 5 simulator `xcodebuild test` command | Exit 1: `xcodebuild` is not recognized. No simulator pass is claimed. |
@@ -182,5 +222,6 @@ xcodebuild test \
 The gate closes only when XcodeGen accepts the app/Widget/entitlement graph,
 the JarvisVoice package and app copy compile under Swift 6, the iOS 18 Control
 Widget availability boundary compiles with the selected SDK, all existing
-Task 4/5 tests pass, all 8 speech tests pass, and all 3 voice-entry tests pass.
+Task 4/5 tests pass, all 9 speech tests pass, all 5 voice-entry tests pass, and
+the generated Info.plist contains the asserted scene/URL/privacy configuration.
 Until that evidence is recorded, Task 6 remains cloud-validation-pending.
