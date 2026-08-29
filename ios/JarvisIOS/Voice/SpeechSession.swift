@@ -201,10 +201,10 @@ public final class SpeechSession: ObservableObject {
     }
 
     public func appWillResignActive() {
-        let wasCapturing = state.isCapturing || audioCapture.isRunning
-        audioCapture.stop()
-        guard wasCapturing else { return }
+        let wasActive = state.isActive || audioCapture.isRunning
         lifecycleGeneration &+= 1
+        audioCapture.stop()
+        guard wasActive else { return }
         recognizer.cancel()
         state = .interrupted
     }

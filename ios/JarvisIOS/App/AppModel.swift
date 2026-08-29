@@ -220,6 +220,7 @@ public final class AppModel: ObservableObject {
 
             switch (self, next) {
             case (.offline, .idle),
+                 (.offline, .listening),
                  (.idle, .listening),
                  (.idle, .failed),
                  (.idle, .thinking),
@@ -278,6 +279,7 @@ public final class AppModel: ObservableObject {
     private var operationGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
     private var voiceGeneration: UInt64 = 0
+    private var voiceAutoSubmissionGeneration: UInt64?
 
     init(
         client: (any JarvisBridgeClient)? = nil,
@@ -436,7 +438,7 @@ public final class AppModel: ObservableObject {
                 }
             }
         case .offline:
-            notice = "电脑离线，语音草稿不会自动发送"
+            beginVoiceStart(with: speechSession)
         case .thinking, .awaitingConfirmation, .executing:
             notice = "当前请求尚未结束，请先处理当前状态"
         default:
@@ -469,16 +471,23 @@ public final class AppModel: ObservableObject {
     }
 
     func appWillResignActive() {
-        let wasVoiceActive = phase == .listening || phase == .transcribing
-        if wasVoiceActive {
+        let wasRequestingPermission = isRequestingSpeechPermission
+        let hadPendingVoice = wasRequestingPermission
+            || phase == .listening
+            || phase == .transcribing
+        if hadPendingVoice {
             voiceGeneration &+= 1
+            voiceAutoSubmissionGeneration = nil
+            isRequestingSpeechPermission = false
         }
         speechSession?.appWillResignActive()
-        if wasVoiceActive {
-            if phase != .idle {
-                _ = transition(to: .idle)
+        if hadPendingVoice {
+            if phase == .listening || phase == .transcribing {
+                _ = transition(to: isConnected ? .idle : .offline)
             }
-            notice = "应用离开前台，录音已停止"
+            notice = wasRequestingPermission || phase == .offline
+                ? "应用离开前台，语音输入已停止"
+                : "应用离开前台，录音已停止"
         }
     }
 
@@ -487,10 +496,11 @@ public final class AppModel: ObservableObject {
             || phase == .listening
             || phase == .transcribing
         voiceGeneration &+= 1
+        voiceAutoSubmissionGeneration = nil
         isRequestingSpeechPermission = false
         speechSession?.cancel()
         if phase == .listening || phase == .transcribing {
-            _ = transition(to: .idle)
+            _ = transition(to: isConnected ? .idle : .offline)
         }
         if hadPendingVoice {
             notice = "应用进入后台，语音输入已停止"
@@ -518,11 +528,13 @@ public final class AppModel: ObservableObject {
     private func beginVoiceStart(with speechSession: SpeechSession) {
         voiceGeneration &+= 1
         let generation = voiceGeneration
+        voiceAutoSubmissionGeneration = isConnected ? generation : nil
         isRequestingSpeechPermission = true
         notice = "正在请求麦克风和语音识别权限"
 
         Task { [weak self] in
             guard let self else { return }
+            guard generation == self.voiceGeneration else { return }
             do {
                 try await speechSession.start()
                 guard generation == self.voiceGeneration else {
@@ -549,7 +561,21 @@ public final class AppModel: ObservableObject {
     ) {
         guard generation == voiceGeneration else { return }
         speechPermissionStatus = speechSession?.permissionStatus ?? speechPermissionStatus
-        guard transition(to: .idle) else { return }
+        let mayAutoSubmit = voiceAutoSubmissionGeneration == generation && isConnected
+        voiceAutoSubmissionGeneration = nil
+        guard transition(to: isConnected ? .idle : .offline) else { return }
+
+        guard mayAutoSubmit else {
+            composerText = result.text
+            if result.requiresReview {
+                notice = "识别结果需要确认，编辑后再发送"
+            } else if isConnected {
+                notice = "语音已保存为草稿，请确认后发送"
+            } else {
+                notice = "电脑离线，语音已保存为草稿，未发送"
+            }
+            return
+        }
 
         guard let executableText = result.executableText else {
             composerText = result.text
@@ -565,6 +591,7 @@ public final class AppModel: ObservableObject {
         ownedBy generation: UInt64
     ) {
         guard generation == voiceGeneration else { return }
+        voiceAutoSubmissionGeneration = nil
         isRequestingSpeechPermission = false
         speechPermissionStatus = speechSession?.permissionStatus ?? speechPermissionStatus
         if phase != .idle {
@@ -593,6 +620,7 @@ public final class AppModel: ObservableObject {
             return
         }
         voiceGeneration &+= 1
+        voiceAutoSubmissionGeneration = nil
         isRequestingSpeechPermission = false
         speechSession?.cancel()
     }

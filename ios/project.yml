@@ -35,6 +35,8 @@ targets:
               - jarvis
         NSMicrophoneUsageDescription: Jarvis 只在你明确开始语音输入后使用麦克风。
         NSSpeechRecognitionUsageDescription: Jarvis 使用语音识别把你主动录制的语音转换为可见文本。
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
         UILaunchScreen: {}
     settings:
       base:

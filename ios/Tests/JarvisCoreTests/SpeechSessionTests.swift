@@ -150,6 +150,42 @@ final class SpeechSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testResignActiveWhilePermissionIsPendingNeverStartsAudio() async {
+        let permissions = FakeSpeechPermissionAuthorizer(
+            status: .undetermined,
+            pausesAuthorizationRequest: true
+        )
+        let recognizer = FakeSpeechRecognizer()
+        let audio = FakeSpeechAudioCapture()
+        let session = SpeechSession(
+            recognizer: recognizer,
+            audioCapture: audio,
+            permissionAuthorizer: permissions
+        )
+
+        let startTask = Task { try await session.start() }
+        let didRequestPermission = await waitUntil {
+            permissions.requestCount == 1
+        }
+        XCTAssertTrue(didRequestPermission)
+        XCTAssertEqual(session.state, .requestingPermission)
+
+        session.appWillResignActive()
+        permissions.resolveAuthorization(.authorized)
+
+        do {
+            try await startTask.value
+            XCTFail("Expected pending start to be interrupted")
+        } catch {
+            XCTAssertEqual(error as? SpeechSessionFailure, .interrupted)
+        }
+        XCTAssertEqual(recognizer.prepareCount, 0)
+        XCTAssertEqual(audio.startCount, 0)
+        XCTAssertFalse(audio.isRunning)
+        XCTAssertEqual(session.state, .interrupted)
+    }
+
+    @MainActor
     func testRecognitionFailureStillReleasesAudioAndShowsFailure() async throws {
         let recognizer = FakeSpeechRecognizer(finishError: .recognitionFailed)
         let audio = FakeSpeechAudioCapture()
@@ -171,6 +207,15 @@ final class SpeechSessionTests: XCTestCase {
         XCTAssertEqual(audio.stopCount, 1)
         XCTAssertEqual(session.state, .failed(.recognitionFailed))
     }
+
+    @MainActor
+    private func waitUntil(_ condition: @MainActor () -> Bool) async -> Bool {
+        for _ in 0 ..< 1_000 {
+            if condition() { return true }
+            await Task.yield()
+        }
+        return false
+    }
 }
 
 private final class FakeSpeechPermissionAuthorizer: SpeechPermissionAuthorizing,
@@ -178,9 +223,15 @@ private final class FakeSpeechPermissionAuthorizer: SpeechPermissionAuthorizing,
 {
     private(set) var requestCount = 0
     private var status: SpeechPermissionStatus
+    private let pausesAuthorizationRequest: Bool
+    private var authorizationContinuation: CheckedContinuation<SpeechPermissionStatus, Never>?
 
-    init(status: SpeechPermissionStatus) {
+    init(
+        status: SpeechPermissionStatus,
+        pausesAuthorizationRequest: Bool = false
+    ) {
         self.status = status
+        self.pausesAuthorizationRequest = pausesAuthorizationRequest
     }
 
     func currentStatus() async -> SpeechPermissionStatus {
@@ -189,8 +240,20 @@ private final class FakeSpeechPermissionAuthorizer: SpeechPermissionAuthorizing,
 
     func requestAuthorization() async -> SpeechPermissionStatus {
         requestCount += 1
+        if pausesAuthorizationRequest {
+            return await withCheckedContinuation { continuation in
+                authorizationContinuation = continuation
+            }
+        }
         status = .authorized
         return status
+    }
+
+    func resolveAuthorization(_ status: SpeechPermissionStatus) {
+        self.status = status
+        let continuation = authorizationContinuation
+        authorizationContinuation = nil
+        continuation?.resume(returning: status)
     }
 }
 

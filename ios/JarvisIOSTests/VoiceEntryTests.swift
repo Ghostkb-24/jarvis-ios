@@ -65,6 +65,47 @@ final class VoiceEntryTests: XCTestCase {
     }
 
     @MainActor
+    func testDefaultOfflineDeepLinkExplicitTapCreatesDraftWithoutSubmitting() async {
+        let client = RecordingVoiceBridgeClient()
+        let permissions = VoiceTestPermissionAuthorizer(status: .undetermined)
+        let audio = VoiceTestAudioCapture()
+        let session = SpeechSession(
+            recognizer: VoiceTestRecognizer(
+                result: .init(text: "明天九点提醒我开会", confidence: 0.96)
+            ),
+            audioCapture: audio,
+            permissionAuthorizer: permissions
+        )
+        let model = AppModel(
+            client: client,
+            speechSession: session
+        )
+
+        model.open(url: URL(string: "jarvis://listen")!)
+        await Task.yield()
+
+        XCTAssertEqual(model.phase, .offline)
+        XCTAssertEqual(model.notice, "语音入口已就绪，点击开始说话")
+        XCTAssertEqual(permissions.requestCount, 0)
+        XCTAssertEqual(audio.startCount, 0)
+
+        model.toggleVoice()
+        let didStartListening = await waitUntil { model.phase == .listening }
+        XCTAssertTrue(didStartListening)
+        XCTAssertEqual(permissions.requestCount, 1)
+        XCTAssertEqual(audio.startCount, 1)
+
+        model.toggleVoice()
+        let didCreateOfflineDraft = await waitUntil {
+            model.phase == .offline && model.composerText == "明天九点提醒我开会"
+        }
+        XCTAssertTrue(didCreateOfflineDraft)
+        XCTAssertEqual(model.notice, "电脑离线，语音已保存为草稿，未发送")
+        let submitCount = await client.submitCount()
+        XCTAssertEqual(submitCount, 0)
+    }
+
+    @MainActor
     func testResignActiveStopsListeningWithoutSubmittingTranscript() async throws {
         let client = RecordingVoiceBridgeClient()
         let audio = VoiceTestAudioCapture()
@@ -95,6 +136,42 @@ final class VoiceEntryTests: XCTestCase {
         XCTAssertEqual(recognizer.cancelCount, 1)
         let submitCount = await client.submitCount()
         XCTAssertEqual(submitCount, 0)
+    }
+
+    @MainActor
+    func testResignActiveWhilePermissionIsPendingNeverStartsRecording() async {
+        let permissions = VoiceTestPermissionAuthorizer(
+            status: .undetermined,
+            pausesAuthorizationRequest: true
+        )
+        let audio = VoiceTestAudioCapture()
+        let session = SpeechSession(
+            recognizer: VoiceTestRecognizer(),
+            audioCapture: audio,
+            permissionAuthorizer: permissions
+        )
+        let model = AppModel(
+            phase: .idle,
+            device: connectedDevice,
+            speechSession: session
+        )
+
+        model.toggleVoice()
+        let didRequestPermission = await waitUntil {
+            permissions.requestCount == 1
+        }
+        XCTAssertTrue(didRequestPermission)
+        XCTAssertTrue(model.isRequestingSpeechPermission)
+
+        model.appWillResignActive()
+        permissions.resolveAuthorization(.authorized)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertFalse(model.isRequestingSpeechPermission)
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertEqual(model.notice, "应用离开前台，语音输入已停止")
+        XCTAssertEqual(audio.startCount, 0)
     }
 
     @MainActor
@@ -155,9 +232,15 @@ private final class VoiceTestPermissionAuthorizer: SpeechPermissionAuthorizing,
 {
     private(set) var requestCount = 0
     private var status: SpeechPermissionStatus
+    private let pausesAuthorizationRequest: Bool
+    private var authorizationContinuation: CheckedContinuation<SpeechPermissionStatus, Never>?
 
-    init(status: SpeechPermissionStatus) {
+    init(
+        status: SpeechPermissionStatus,
+        pausesAuthorizationRequest: Bool = false
+    ) {
         self.status = status
+        self.pausesAuthorizationRequest = pausesAuthorizationRequest
     }
 
     func currentStatus() async -> SpeechPermissionStatus {
@@ -166,8 +249,20 @@ private final class VoiceTestPermissionAuthorizer: SpeechPermissionAuthorizing,
 
     func requestAuthorization() async -> SpeechPermissionStatus {
         requestCount += 1
+        if pausesAuthorizationRequest {
+            return await withCheckedContinuation { continuation in
+                authorizationContinuation = continuation
+            }
+        }
         status = .authorized
         return status
+    }
+
+    func resolveAuthorization(_ status: SpeechPermissionStatus) {
+        self.status = status
+        let continuation = authorizationContinuation
+        authorizationContinuation = nil
+        continuation?.resume(returning: status)
     }
 }
 
