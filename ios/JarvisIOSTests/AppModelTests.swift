@@ -3,8 +3,8 @@ import JarvisProtocol
 import XCTest
 @testable import JarvisIOS
 
-@MainActor
 final class AppModelTests: XCTestCase {
+    @MainActor
     func testSubmitTextUsesBridgeChatRequestAndAppliesItsResponse() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -33,6 +33,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.messages.last?.text, "Bridge 回答")
     }
 
+    @MainActor
     func testOlderOutOfOrderSuccessCannotOverwriteNewerOperation() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -79,6 +80,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.messages.contains { $0.text == "旧结果" })
     }
 
+    @MainActor
     func testStaleErrorCannotReplaceNewerCompletion() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -120,6 +122,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotEqual(model.notice, "请求未完成")
     }
 
+    @MainActor
     func testSubmitAndVoiceAreRejectedWhileConfirmationIsExecuting() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -169,6 +172,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(didComplete)
     }
 
+    @MainActor
     func testTypedToolProposalAwaitsPreviewThenConfirmsThroughBridge() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -229,6 +233,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(didComplete)
     }
 
+    @MainActor
     func testCancellingToolPreviewDoesNotCallBridgeConfirmation() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -265,6 +270,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(confirmationCount, 0)
     }
 
+    @MainActor
     private func makeModel(client: ControllableBridgeClient) -> AppModel {
         AppModel(
             client: client,
@@ -274,6 +280,7 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    @MainActor
     private var connectedDevice: DeviceSnapshot {
         DeviceSnapshot(
             computerName: "测试电脑",
