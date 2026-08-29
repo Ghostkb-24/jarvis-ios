@@ -18,6 +18,12 @@ Static review round 1 fix commit:
 findings in `task-6-review-round-1.md` are addressed in source and regression
 tests; executable Swift/Xcode validation remains part of the open cloud gate.
 
+Static review round 2 fix commit:
+`38394f4` (`fix: retain unavailable voice submissions`). The remaining
+connected-without-client transcript-loss finding is covered by app-level
+regressions; executable Swift/Xcode validation remains part of the open cloud
+gate.
+
 The SDD progress ledger was not changed. No Task 7 Codemagic configuration or
 Task 8 integration/acceptance work was created.
 
@@ -80,6 +86,12 @@ Task 8 integration/acceptance work was created.
   auto-submitted. The start generation records whether auto-submission was
   eligible, so reconnecting midway cannot upgrade an offline recording into an
   automatic Bridge request.
+- Automatic submission eligibility is captured per voice generation and now
+  requires both a connected snapshot and a non-nil Bridge client at recording
+  start. A connected status alone cannot discard a transcript. If synchronous
+  `submit(text:)` returns `false` for any reason, the executable transcript is
+  written back to the composer and the specific failure notice is extended to
+  state truthfully that the draft was saved.
 
 ## Siri, Action button, and deep-link decisions
 
@@ -153,7 +165,7 @@ There are 9 package speech tests:
 9. A suspended fake authorizer resolved after resign-active never prepares the
    recognizer or starts the fake audio capture.
 
-There are 5 app-target voice-entry tests:
+There are 8 app-target voice-entry tests:
 
 1. Low-confidence speech becomes a composer draft and never calls Bridge.
 2. `jarvis://listen` prepares the conversation tab without requesting
@@ -164,6 +176,13 @@ There are 5 app-target voice-entry tests:
    without calling Bridge.
 5. Resign-active while the app-level permission request is suspended clears
    the pending UI state and never starts recording.
+6. Connected-without-client high-confidence speech remains an editable draft
+   with a truthful unavailable notice.
+7. A real synchronous `submit == false` path, triggered by invalid request
+   identity, restores executable speech to the composer and preserves the
+   specific request-construction failure in the notice.
+8. Reconnecting during a voice capture that began offline does not upgrade it
+   to automatic submission.
 
 For round 1, the durable Info.plist regression was written before the manifest.
 `py -3.12 -m pytest tests/test_ios_project_config.py -q` failed on the missing
@@ -171,6 +190,12 @@ For round 1, the durable Info.plist regression was written before the manifest.
 added. The two new Swift race/behavior regressions were likewise written before
 their production changes, but executable RED/GREEN remains unavailable because
 this Windows host has no `swift` command.
+
+For round 2, the connected-without-client and submit-false regressions were
+written before the production change. The explicit RED attempt again stopped
+before test discovery because `swift` is unavailable. A third characterization
+test locks the existing offline-start/reconnect no-upgrade behavior, while the
+original low-confidence test continues to enforce no automatic submission.
 
 ## Local commands and results
 
@@ -193,6 +218,10 @@ All commands ran from
 | Round 1 `py -3.12 -m ruff check src tests` | `All checks passed!`. |
 | Round 1 Swift delimiter/config/privacy static gate | Passed for 4 changed Swift files; parsed XcodeGen scene/URL/privacy values; Widget secret-field scan clean. |
 | `git diff --cached --check` before round 1 source commit | Passed; only line-ending conversion notices were printed. |
+| Round 2 `cd ios; swift test --filter VoiceEntryTests` RED attempt | Exit 1 before test discovery: `swift` is not installed. No executable RED is claimed. |
+| Round 2 full regression: `$env:PYTHONPATH='src'; py -3.12 -m pytest -q` | `185 passed in 12.91s`. |
+| Round 2 `py -3.12 -m ruff check src tests` | `All checks passed!`. |
+| Round 2 Swift delimiter and Git whitespace checks | Passed for the 2 changed Swift files; cached diff clean apart from line-ending conversion notices. |
 | `cd ios; swift test` after implementation | Exit 1: `swift` is not recognized. No Swift test pass is claimed. |
 | `cd ios; xcodegen generate` | Exit 1: `xcodegen` is not recognized. XcodeGen schema acceptance is not claimed. |
 | Task 5 simulator `xcodebuild test` command | Exit 1: `xcodebuild` is not recognized. No simulator pass is claimed. |
@@ -222,6 +251,6 @@ xcodebuild test \
 The gate closes only when XcodeGen accepts the app/Widget/entitlement graph,
 the JarvisVoice package and app copy compile under Swift 6, the iOS 18 Control
 Widget availability boundary compiles with the selected SDK, all existing
-Task 4/5 tests pass, all 9 speech tests pass, all 5 voice-entry tests pass, and
+Task 4/5 tests pass, all 9 speech tests pass, all 8 voice-entry tests pass, and
 the generated Info.plist contains the asserted scene/URL/privacy configuration.
 Until that evidence is recorded, Task 6 remains cloud-validation-pending.
