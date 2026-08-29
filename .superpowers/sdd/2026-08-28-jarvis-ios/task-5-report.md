@@ -8,9 +8,11 @@ implemented. Static-review round 1 also adds six AppModel unit tests and the
 state/ownership controls they specify. Static-review round 2 removes the
 Swift-6-incompatible class-level `@MainActor` annotation from `XCTestCase` and
 applies it only to the six tests and the two AppModel-state helpers that need
-it; the controllable Bridge remains a non-main-actor `actor`. This Windows host
-has neither XcodeGen nor Xcode, so no local Swift compile, simulator run, or
-test pass is claimed.
+it; the controllable Bridge remains a non-main-actor `actor`. Static-review
+round 3 also locally isolates the four async XCTest helpers that participate in
+AppModel-state waiting, avoiding a non-Sendable XCTestCase crossing an async
+boundary. This Windows host has neither XcodeGen nor Xcode, so no local Swift
+compile, simulator run, or test pass is claimed.
 
 Implementation commit:
 `8bd7fc8f134c5035b60c2e561a09b4581ea32602`
@@ -139,6 +141,9 @@ All commands ran from
 | Static-review round-2 XCTest-isolation source assertion | Passed: no class-level `@MainActor`, all 6 tests and the 2 AppModel-state helpers are locally `@MainActor`, and `ControllableBridgeClient` remains an unannotated actor. |
 | `$env:PYTHONPATH='src'; py -3.12 -m pytest -q --basetemp='.task5-review2-temp'` | Round 2: `184 passed in 12.98s`. |
 | `py -3.12 -m ruff check src tests` | Round 2: `All checks passed!`. |
+| Static-review round-3 XCTest-helper isolation source assertion | Passed: all 4 async helpers are locally `@MainActor`; the class and controllable Bridge actor remain nonisolated; 6 tests and XcodeGen targets are unchanged. |
+| `$env:PYTHONPATH='src'; py -3.12 -m pytest -q --basetemp='.task5-review3-temp'` | Round 3: `184 passed in 12.91s`. |
+| `py -3.12 -m ruff check src tests` | Round 3: `All checks passed!`. |
 
 The Python, YAML, source-inventory, and Git checks prove repository hygiene and
 desktop non-regression only. They do not prove that the Swift source compiles or

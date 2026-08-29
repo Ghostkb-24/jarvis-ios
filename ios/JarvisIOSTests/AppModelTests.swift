@@ -323,6 +323,7 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    @MainActor
     private func waitForSubmitCount(
         _ expected: Int,
         client: ControllableBridgeClient
@@ -334,6 +335,7 @@ final class AppModelTests: XCTestCase {
         return false
     }
 
+    @MainActor
     private func waitForConfirmationCount(
         _ expected: Int,
         client: ControllableBridgeClient
@@ -345,6 +347,7 @@ final class AppModelTests: XCTestCase {
         return false
     }
 
+    @MainActor
     private func waitUntil(_ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0 ..< 1_000 {
             if condition() { return true }
@@ -353,6 +356,7 @@ final class AppModelTests: XCTestCase {
         return false
     }
 
+    @MainActor
     private func settleAsyncWork() async {
         for _ in 0 ..< 50 {
             await Task.yield()
