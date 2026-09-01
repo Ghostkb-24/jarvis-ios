@@ -9,6 +9,8 @@ public enum BridgeProtocolError: Error, Equatable, Sendable {
     case invalidFingerprint
     case invalidTimestamp(field: String)
     case staleMessage(field: String)
+    case invalidPublicKey
+    case invalidLifecycleState(type: String, state: String)
     case unknownFields(type: String, fields: [String])
     case unknownEnumValue(type: String, value: String)
 }
@@ -32,6 +34,10 @@ extension BridgeProtocolError: LocalizedError {
             "Bridge protocol timestamp is invalid: \(field)"
         case let .staleMessage(field):
             "Bridge protocol message is stale: \(field)"
+        case .invalidPublicKey:
+            "Device public key must be 64 lowercase hexadecimal characters"
+        case let .invalidLifecycleState(type, state):
+            "\(type) cannot use task state \(state)"
         case let .unknownFields(type, fields):
             "Unknown \(type) fields: \(fields.joined(separator: ", "))"
         case let .unknownEnumValue(type, value):
@@ -399,6 +405,43 @@ public struct PairingPayload: Codable, Equatable, Sendable {
     public let sessionID: String
     public let expiresAt: String
     public let proof: String
+    public let deviceID: String
+    public let devicePublicKey: String
+
+    public init(
+        version: Int,
+        bridgeID: String,
+        bridgeURL: String,
+        certificateFingerprint: String,
+        sessionID: String,
+        expiresAt: String,
+        proof: String,
+        deviceID: String,
+        devicePublicKey: String
+    ) throws {
+        try validateVersion(version)
+        for (value, field) in [
+            (bridgeID, "bridge_id"),
+            (bridgeURL, "bridge_url"),
+            (sessionID, "session_id"),
+            (expiresAt, "expires_at"),
+            (proof, "proof"),
+            (deviceID, "device_id"),
+        ] {
+            guard !value.isEmpty else { throw BridgeProtocolError.emptyField(field) }
+        }
+        try ProtocolValidation.validateFingerprint(certificateFingerprint)
+        try ProtocolValidation.validatePublicKey(devicePublicKey)
+        self.version = version
+        self.bridgeID = bridgeID
+        self.bridgeURL = bridgeURL
+        self.certificateFingerprint = certificateFingerprint
+        self.sessionID = sessionID
+        self.expiresAt = expiresAt
+        self.proof = proof
+        self.deviceID = deviceID
+        self.devicePublicKey = devicePublicKey
+    }
 
     public init(
         version: Int,
@@ -409,24 +452,17 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         expiresAt: String,
         proof: String
     ) throws {
-        guard version == 1 else { throw BridgeProtocolError.unsupportedVersion(version) }
-        for (value, field) in [
-            (bridgeID, "bridge_id"),
-            (bridgeURL, "bridge_url"),
-            (sessionID, "session_id"),
-            (expiresAt, "expires_at"),
-            (proof, "proof"),
-        ] {
-            guard !value.isEmpty else { throw BridgeProtocolError.emptyField(field) }
-        }
-        try ProtocolValidation.validateFingerprint(certificateFingerprint)
-        self.version = version
-        self.bridgeID = bridgeID
-        self.bridgeURL = bridgeURL
-        self.certificateFingerprint = certificateFingerprint
-        self.sessionID = sessionID
-        self.expiresAt = expiresAt
-        self.proof = proof
+        try self.init(
+            version: version,
+            bridgeID: bridgeID,
+            bridgeURL: bridgeURL,
+            certificateFingerprint: certificateFingerprint,
+            sessionID: sessionID,
+            expiresAt: expiresAt,
+            proof: proof,
+            deviceID: sessionID,
+            devicePublicKey: String(repeating: "0", count: 64)
+        )
     }
 
     public init(from decoder: Decoder) throws {
@@ -435,7 +471,7 @@ public struct PairingPayload: Codable, Equatable, Sendable {
             type: "PairingPayload",
             allowed: [
                 "version", "bridge_id", "bridge_url", "certificate_sha256",
-                "session_id", "expires_at", "proof",
+                "session_id", "expires_at", "proof", "device_id", "device_public_key",
             ]
         )
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -446,7 +482,9 @@ public struct PairingPayload: Codable, Equatable, Sendable {
             certificateFingerprint: container.decode(String.self, forKey: .certificateFingerprint),
             sessionID: container.decode(String.self, forKey: .sessionID),
             expiresAt: container.decode(String.self, forKey: .expiresAt),
-            proof: container.decode(String.self, forKey: .proof)
+            proof: container.decode(String.self, forKey: .proof),
+            deviceID: container.decode(String.self, forKey: .deviceID),
+            devicePublicKey: container.decode(String.self, forKey: .devicePublicKey)
         )
     }
 
@@ -458,6 +496,8 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         case sessionID = "session_id"
         case expiresAt = "expires_at"
         case proof
+        case deviceID = "device_id"
+        case devicePublicKey = "device_public_key"
     }
 }
 
@@ -521,6 +561,24 @@ public struct PairingChallenge: Codable, Equatable, Sendable {
         )
     }
 
+    public func validateFreshness(
+        now: Date,
+        maxAge: TimeInterval = 300,
+        maxFutureSkew: TimeInterval = 30
+    ) throws {
+        _ = try ProtocolValidation.validateTimestamp(
+            issuedAt,
+            field: "issued_at",
+            now: now,
+            maxAge: maxAge,
+            maxFutureSkew: maxFutureSkew
+        )
+        let expiry = try ProtocolValidation.parseTimestamp(expiresAt, field: "expires_at")
+        guard expiry.timeIntervalSince(now) >= -maxFutureSkew else {
+            throw BridgeProtocolError.staleMessage(field: "expires_at")
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version
         case sessionID = "session_id"
@@ -536,6 +594,8 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
     public let version: Int
     public let sessionID: String
     public let deviceName: String
+    public let deviceID: String
+    public let devicePublicKey: String
     public let pairingCode: String
     public let challengeNonce: String
     public let issuedAt: String
@@ -544,6 +604,8 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
         version: Int,
         sessionID: String,
         deviceName: String,
+        deviceID: String,
+        devicePublicKey: String,
         pairingCode: String,
         challengeNonce: String,
         issuedAt: String
@@ -551,12 +613,16 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
         try validateVersion(version)
         try requireNonempty(sessionID, field: "session_id")
         try requireNonempty(deviceName, field: "device_name")
+        try requireNonempty(deviceID, field: "device_id")
         try requireNonempty(pairingCode, field: "pairing_code")
         try requireNonempty(challengeNonce, field: "challenge_nonce")
         _ = try ProtocolValidation.parseTimestamp(issuedAt, field: "issued_at")
+        try ProtocolValidation.validatePublicKey(devicePublicKey)
         self.version = version
         self.sessionID = sessionID
         self.deviceName = deviceName
+        self.deviceID = deviceID
+        self.devicePublicKey = devicePublicKey
         self.pairingCode = pairingCode
         self.challengeNonce = challengeNonce
         self.issuedAt = issuedAt
@@ -570,6 +636,8 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
                 "version",
                 "session_id",
                 "device_name",
+                "device_id",
+                "device_public_key",
                 "pairing_code",
                 "challenge_nonce",
                 "issued_at",
@@ -580,9 +648,25 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
             version: container.decode(Int.self, forKey: .version),
             sessionID: container.decode(String.self, forKey: .sessionID),
             deviceName: container.decode(String.self, forKey: .deviceName),
+            deviceID: container.decode(String.self, forKey: .deviceID),
+            devicePublicKey: container.decode(String.self, forKey: .devicePublicKey),
             pairingCode: container.decode(String.self, forKey: .pairingCode),
             challengeNonce: container.decode(String.self, forKey: .challengeNonce),
             issuedAt: container.decode(String.self, forKey: .issuedAt)
+        )
+    }
+
+    public func validateFreshness(
+        now: Date,
+        maxAge: TimeInterval = 300,
+        maxFutureSkew: TimeInterval = 30
+    ) throws {
+        _ = try ProtocolValidation.validateTimestamp(
+            issuedAt,
+            field: "issued_at",
+            now: now,
+            maxAge: maxAge,
+            maxFutureSkew: maxFutureSkew
         )
     }
 
@@ -590,6 +674,8 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
         case version
         case sessionID = "session_id"
         case deviceName = "device_name"
+        case deviceID = "device_id"
+        case devicePublicKey = "device_public_key"
         case pairingCode = "pairing_code"
         case challengeNonce = "challenge_nonce"
         case issuedAt = "issued_at"
@@ -757,6 +843,20 @@ public struct TaskConfirmation: Codable, Equatable, Sendable {
         )
     }
 
+    public func validateFreshness(
+        now: Date,
+        maxAge: TimeInterval = 300,
+        maxFutureSkew: TimeInterval = 30
+    ) throws {
+        _ = try ProtocolValidation.validateTimestamp(
+            decidedAt,
+            field: "decided_at",
+            now: now,
+            maxAge: maxAge,
+            maxFutureSkew: maxFutureSkew
+        )
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version
         case requestID = "request_id"
@@ -786,6 +886,7 @@ public struct TaskProgress: Codable, Equatable, Sendable {
         try requireNonempty(requestID, field: "request_id")
         try requireNonempty(taskID, field: "task_id")
         try requireNonempty(progressMessage, field: "progress_message")
+        try validateProgressState(state)
         self.version = version
         self.requestID = requestID
         self.taskID = taskID
@@ -848,6 +949,7 @@ public struct TaskTerminalResult: Codable, Equatable, Sendable {
         try requireNonempty(requestID, field: "request_id")
         try requireNonempty(taskID, field: "task_id")
         try requireNonempty(summary, field: "summary")
+        try validateTerminalState(state)
         self.version = version
         self.requestID = requestID
         self.taskID = taskID
@@ -1006,6 +1108,12 @@ public enum ProtocolValidation {
         }
     }
 
+    public static func validatePublicKey(_ value: String) throws {
+        guard isLowercaseHex(value, length: 64) else {
+            throw BridgeProtocolError.invalidPublicKey
+        }
+    }
+
     public static func isLowercaseHex(_ value: String, length: Int) -> Bool {
         value.utf8.count == length
             && value.utf8.allSatisfy { byte in
@@ -1038,6 +1146,30 @@ private func validateVersion(_ version: Int) throws {
 
 private func requireNonempty(_ value: String, field: String) throws {
     guard !value.isEmpty else { throw BridgeProtocolError.emptyField(field) }
+}
+
+private func validateProgressState(_ state: TaskState) throws {
+    switch state {
+    case .preparing, .awaitingConfirmation, .executing:
+        return
+    case .completed, .failed, .cancelled, .resultUnknown:
+        throw BridgeProtocolError.invalidLifecycleState(
+            type: "TaskProgress",
+            state: state.rawValue
+        )
+    }
+}
+
+private func validateTerminalState(_ state: TaskState) throws {
+    switch state {
+    case .completed, .failed, .cancelled, .resultUnknown:
+        return
+    case .preparing, .awaitingConfirmation, .executing:
+        throw BridgeProtocolError.invalidLifecycleState(
+            type: "TaskTerminalResult",
+            state: state.rawValue
+        )
+    }
 }
 
 private enum CanonicalJSON {

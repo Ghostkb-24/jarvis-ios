@@ -48,8 +48,25 @@ final class BridgeModelsTests: XCTestCase {
         XCTAssertEqual(decoded, challenge)
     }
 
+    func testPairingPayloadCarriesPersistentDeviceIdentityAndKeyBinding() throws {
+        let payload = try PairingPayload(
+            version: 1,
+            bridgeID: "bridge-1",
+            bridgeURL: "https://192.168.1.20:8443",
+            certificateFingerprint: String(repeating: "ab", count: 32),
+            sessionID: "session-1",
+            expiresAt: "2026-09-01T09:05:00Z",
+            proof: "proof",
+            deviceID: "iphone-1",
+            devicePublicKey: String(repeating: "cd", count: 32)
+        )
+
+        XCTAssertEqual(payload.deviceID, "iphone-1")
+        XCTAssertEqual(payload.devicePublicKey, String(repeating: "cd", count: 32))
+    }
+
     func testPairingChallengeResponseRejectsUnknownFields() {
-        let data = Data(#"{"version":1,"session_id":"session-1","device_name":"iPhone","pairing_code":"493821","challenge_nonce":"nonce-1","issued_at":"2026-09-01T09:00:00Z","unexpected":true}"#.utf8)
+        let data = Data(#"{"version":1,"session_id":"session-1","device_name":"iPhone","device_id":"iphone-1","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","pairing_code":"493821","challenge_nonce":"nonce-1","issued_at":"2026-09-01T09:00:00Z","unexpected":true}"#.utf8)
 
         XCTAssertThrowsError(try JSONDecoder().decode(PairingChallengeResponse.self, from: data)) { error in
             XCTAssertEqual(
@@ -57,6 +74,22 @@ final class BridgeModelsTests: XCTestCase {
                 .unknownFields(type: "PairingChallengeResponse", fields: ["unexpected"])
             )
         }
+    }
+
+    func testPairingChallengeResponseCarriesDeviceIdentityAndKeyBinding() throws {
+        let response = try PairingChallengeResponse(
+            version: 1,
+            sessionID: "session-1",
+            deviceName: "iPhone",
+            deviceID: "iphone-1",
+            devicePublicKey: String(repeating: "cd", count: 32),
+            pairingCode: "493821",
+            challengeNonce: "nonce-1",
+            issuedAt: "2026-09-01T09:00:00Z"
+        )
+
+        XCTAssertEqual(response.deviceID, "iphone-1")
+        XCTAssertEqual(response.devicePublicKey, String(repeating: "cd", count: 32))
     }
 
     func testTaskSubmissionCarriesRequestAndIdempotencyIdentifiers() throws {
@@ -101,6 +134,71 @@ final class BridgeModelsTests: XCTestCase {
         XCTAssertEqual(confirmation.decision, .approve)
     }
 
+    func testPairingChallengeFreshnessValidationRejectsStaleMessage() throws {
+        let challenge = try PairingChallenge(
+            version: 1,
+            sessionID: "session-1",
+            bridgeID: "bridge-1",
+            pairingCode: "493821",
+            challengeNonce: "nonce-1",
+            issuedAt: "2026-09-01T08:40:00Z",
+            expiresAt: "2026-09-01T08:45:00Z"
+        )
+
+        XCTAssertThrowsError(
+            try challenge.validateFreshness(
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(error as? BridgeProtocolError, .staleMessage(field: "issued_at"))
+        }
+    }
+
+    func testPairingChallengeResponseFreshnessValidationRejectsStaleMessage() throws {
+        let response = try PairingChallengeResponse(
+            version: 1,
+            sessionID: "session-1",
+            deviceName: "iPhone",
+            deviceID: "iphone-1",
+            devicePublicKey: String(repeating: "cd", count: 32),
+            pairingCode: "493821",
+            challengeNonce: "nonce-1",
+            issuedAt: "2026-09-01T08:40:00Z"
+        )
+
+        XCTAssertThrowsError(
+            try response.validateFreshness(
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(error as? BridgeProtocolError, .staleMessage(field: "issued_at"))
+        }
+    }
+
+    func testTaskConfirmationFreshnessValidationRejectsStaleMessage() throws {
+        let confirmation = try TaskConfirmation(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            decision: .approve,
+            decidedAt: "2026-09-01T08:40:00Z"
+        )
+
+        XCTAssertThrowsError(
+            try confirmation.validateFreshness(
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(error as? BridgeProtocolError, .staleMessage(field: "decided_at"))
+        }
+    }
+
     func testTaskProgressAndTerminalResultRoundTrip() throws {
         let progress = try TaskProgress(
             version: 1,
@@ -121,6 +219,46 @@ final class BridgeModelsTests: XCTestCase {
 
         XCTAssertEqual(try JSONDecoder().decode(TaskProgress.self, from: JSONEncoder().encode(progress)), progress)
         XCTAssertEqual(try JSONDecoder().decode(TaskTerminalResult.self, from: JSONEncoder().encode(result)), result)
+    }
+
+    func testTaskProgressRejectsTerminalStates() {
+        for state in [TaskState.completed, .failed, .cancelled, .resultUnknown] {
+            XCTAssertThrowsError(
+                try TaskProgress(
+                    version: 1,
+                    requestID: "req-1",
+                    taskID: "task-1",
+                    state: state,
+                    progressMessage: "Nope",
+                    eventIndex: 1
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? BridgeProtocolError,
+                    .invalidLifecycleState(type: "TaskProgress", state: state.rawValue)
+                )
+            }
+        }
+    }
+
+    func testTaskTerminalResultRejectsNonTerminalStates() {
+        for state in [TaskState.preparing, .awaitingConfirmation, .executing] {
+            XCTAssertThrowsError(
+                try TaskTerminalResult(
+                    version: 1,
+                    requestID: "req-1",
+                    taskID: "task-1",
+                    state: state,
+                    summary: "Nope",
+                    output: [:]
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? BridgeProtocolError,
+                    .invalidLifecycleState(type: "TaskTerminalResult", state: state.rawValue)
+                )
+            }
+        }
     }
 
     func testRejectedTaskUsesExplicitReasonCode() throws {
@@ -278,7 +416,7 @@ final class BridgeModelsTests: XCTestCase {
 
     func testPairingPayloadRejectsUnknownTopLevelFields() {
         let fingerprint = String(repeating: "ab", count: 32)
-        let data = Data(#"{"version":1,"bridge_id":"bridge-1","bridge_url":"https://192.168.1.20:8443","certificate_sha256":"\#(fingerprint)","session_id":"session-1","expires_at":"2026-08-28T00:02:00+00:00","proof":"proof","unexpected":true}"#.utf8)
+        let data = Data(#"{"version":1,"bridge_id":"bridge-1","bridge_url":"https://192.168.1.20:8443","certificate_sha256":"\#(fingerprint)","session_id":"session-1","expires_at":"2026-08-28T00:02:00+00:00","proof":"proof","device_id":"iphone-1","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","unexpected":true}"#.utf8)
 
         XCTAssertThrowsError(try JSONDecoder().decode(PairingPayload.self, from: data)) { error in
             XCTAssertEqual(
