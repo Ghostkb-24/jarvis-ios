@@ -5,25 +5,18 @@ import Security
 public struct DeviceCredentials: Equatable, Sendable {
     public let deviceID: String
     public let secret: Data
-    public let certificateFingerprint: String
 
-    public init(
-        deviceID: String,
-        secret: Data,
-        certificateFingerprint: String
-    ) throws {
+    public init(deviceID: String, secret: Data) throws {
         guard !deviceID.isEmpty else { throw BridgeProtocolError.emptyField("device_id") }
         guard secret.count == 32 else { throw BridgeProtocolError.invalidSecretLength }
-        try ProtocolValidation.validateFingerprint(certificateFingerprint)
         self.deviceID = deviceID
         self.secret = secret
-        self.certificateFingerprint = certificateFingerprint
     }
 }
 
 extension DeviceCredentials: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String {
-        "DeviceCredentials(deviceID: \(deviceID), secret: <redacted>, certificateFingerprint: <redacted>)"
+        "DeviceCredentials(deviceID: \(deviceID), secret: <redacted>)"
     }
 
     public var debugDescription: String { description }
@@ -157,7 +150,6 @@ public struct KeychainDeviceStore: Sendable {
     public static let credentialAccounts = [
         "device-id",
         "device-secret",
-        "certificate-sha256",
     ]
 
     private let service: String
@@ -175,7 +167,6 @@ public struct KeychainDeviceStore: Sendable {
         let values: [(String, Data)] = [
             (Self.credentialAccounts[0], Data(credentials.deviceID.utf8)),
             (Self.credentialAccounts[1], credentials.secret),
-            (Self.credentialAccounts[2], Data(credentials.certificateFingerprint.utf8)),
         ]
         for (account, value) in values {
             try write(value, account: account)
@@ -191,22 +182,14 @@ public struct KeychainDeviceStore: Sendable {
         }
         guard
             let deviceData = values[0],
-            let secret = values[1],
-            let fingerprintData = values[2]
+            let secret = values[1]
         else {
             throw KeychainStoreError.incompleteCredentials
         }
-        guard
-            let deviceID = String(data: deviceData, encoding: .utf8),
-            let fingerprint = String(data: fingerprintData, encoding: .utf8)
-        else {
+        guard let deviceID = String(data: deviceData, encoding: .utf8) else {
             throw KeychainStoreError.invalidEncoding
         }
-        return try DeviceCredentials(
-            deviceID: deviceID,
-            secret: secret,
-            certificateFingerprint: fingerprint
-        )
+        return try DeviceCredentials(deviceID: deviceID, secret: secret)
     }
 
     public func delete() throws {

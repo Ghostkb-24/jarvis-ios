@@ -13,6 +13,7 @@ public enum BridgeError: Error, Equatable, Sendable {
     case invalidOperationRequest
     case requestOwnershipMismatch
     case requestTargetMismatch
+    case requestRejected(TaskRejection)
     case resultUnknown
     case transportUnavailable
 }
@@ -36,6 +37,8 @@ extension BridgeError: LocalizedError {
             "Signed request does not belong to the paired device"
         case .requestTargetMismatch:
             "Signed target does not match the requested task"
+        case let .requestRejected(rejection):
+            rejection.message
         case .resultUnknown:
             "Bridge request result is unknown; do not automatically resubmit"
         case .transportUnavailable:
@@ -175,39 +178,126 @@ public struct BridgeRetryPolicy: Equatable, Sendable {
     }
 }
 
+public enum BridgeEndpoint: Equatable, Sendable {
+    case discovered(DiscoveryMessage)
+    case manual(baseURL: URL, certificateFingerprint: String)
+
+    fileprivate var resolvedURL: URL? {
+        switch self {
+        case let .discovered(message):
+            URL(string: message.bridgeURL)
+        case let .manual(baseURL, _):
+            baseURL
+        }
+    }
+
+    fileprivate var certificateFingerprint: String {
+        switch self {
+        case let .discovered(message):
+            message.certificateFingerprint
+        case let .manual(_, fingerprint):
+            fingerprint
+        }
+    }
+}
+
+public enum BridgeConnectionState: Equatable, Sendable {
+    case unpaired(endpoint: BridgeEndpoint)
+    case paired(endpoint: BridgeEndpoint, deviceID: String)
+    case connecting(endpoint: BridgeEndpoint, deviceID: String)
+    case connected(endpoint: BridgeEndpoint, deviceID: String)
+    case disconnected(endpoint: BridgeEndpoint, deviceID: String, canRetryReads: Bool)
+}
+
+public enum BridgeEvent: Equatable, Sendable {
+    case preview(TaskPreview)
+    case progress(TaskProgress)
+    case terminal(TaskTerminalResult)
+    case rejection(TaskRejection)
+}
+
 public struct BridgeClient: Sendable {
+    private let endpointSelection: BridgeEndpoint
     private let baseURL: URL
     private let credentials: DeviceCredentials
     private let transport: any BridgeTransport
     private let retryPolicy: BridgeRetryPolicy
+    private let stateStore: BridgeConnectionStateStore
 
     public init(
-        baseURL: URL,
+        endpoint: BridgeEndpoint,
         credentials: DeviceCredentials,
         transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory(),
         retryPolicy: BridgeRetryPolicy = .safeReadsOnly()
     ) throws {
+        let baseURL = try validatedBaseURL(for: endpoint)
         let transport = try transportFactory.makeTransport(
-            certificateFingerprint: credentials.certificateFingerprint
+            certificateFingerprint: endpoint.certificateFingerprint
         )
+        self.endpointSelection = endpoint
+        self.baseURL = baseURL
+        self.credentials = credentials
+        self.transport = transport
+        self.retryPolicy = retryPolicy
+        stateStore = BridgeConnectionStateStore(
+            initial: .paired(endpoint: endpoint, deviceID: credentials.deviceID)
+        )
+    }
+
+    public init(
+        endpoint: BridgeEndpoint,
+        credentials: DeviceCredentials,
+        transport: any BridgeTransport,
+        retryPolicy: BridgeRetryPolicy = .safeReadsOnly()
+    ) throws {
+        self.endpointSelection = endpoint
+        baseURL = try Self.validatedBaseURL(for: endpoint)
+        self.credentials = credentials
+        self.transport = transport
+        self.retryPolicy = retryPolicy
+        stateStore = BridgeConnectionStateStore(
+            initial: .paired(endpoint: endpoint, deviceID: credentials.deviceID)
+        )
+    }
+
+    public init(
+        baseURL: URL,
+        certificateFingerprint: String,
+        credentials: DeviceCredentials,
+        transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory(),
+        retryPolicy: BridgeRetryPolicy = .safeReadsOnly()
+    ) throws {
         try self.init(
-            baseURL: baseURL,
+            endpoint: .manual(
+                baseURL: baseURL,
+                certificateFingerprint: certificateFingerprint
+            ),
             credentials: credentials,
-            transport: transport,
+            transportFactory: transportFactory,
             retryPolicy: retryPolicy
         )
     }
 
     public init(
         baseURL: URL,
+        certificateFingerprint: String,
         credentials: DeviceCredentials,
         transport: any BridgeTransport,
         retryPolicy: BridgeRetryPolicy = .safeReadsOnly()
     ) throws {
-        self.baseURL = try BridgeURLValidator.validate(baseURL)
-        self.credentials = credentials
-        self.transport = transport
-        self.retryPolicy = retryPolicy
+        try self.init(
+            endpoint: .manual(
+                baseURL: baseURL,
+                certificateFingerprint: certificateFingerprint
+            ),
+            credentials: credentials,
+            transport: transport,
+            retryPolicy: retryPolicy
+        )
+    }
+
+    public func connectionState() async -> BridgeConnectionState {
+        await stateStore.current()
     }
 
     public func submit(_ request: BridgeRequest) async throws -> BridgeResponse {
@@ -230,11 +320,7 @@ public struct BridgeClient: Sendable {
         try requireOwner(authentication)
         try requireTarget(requestID, request: authentication)
         let url = endpoint(["v1", "tasks", requestID])
-        let urlRequest = try signedURLRequest(
-            url: url,
-            method: "GET",
-            request: authentication
-        )
+        let urlRequest = try signedURLRequest(url: url, method: "GET", request: authentication)
         return try await sendReadOnly(urlRequest)
     }
 
@@ -268,17 +354,26 @@ public struct BridgeClient: Sendable {
         _ payload: PairingPayload,
         deviceName: String,
         store: KeychainDeviceStore,
-        transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory()
+        transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory(),
+        now: Date = Date()
     ) async throws -> DeviceCredentials {
         guard !deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeProtocolError.emptyField("device_name")
         }
+        let expiry = try ProtocolValidation.parseTimestamp(payload.expiresAt, field: "expires_at")
+        guard expiry.timeIntervalSince(now) >= -30 else {
+            throw BridgeProtocolError.staleMessage(field: "expires_at")
+        }
         guard let rawURL = URL(string: payload.bridgeURL) else {
             throw BridgeError.invalidBridgeURL
         }
-        let baseURL = try BridgeURLValidator.validate(rawURL)
-        let transport = try transportFactory.makeTransport(
+        let manualEndpoint = BridgeEndpoint.manual(
+            baseURL: rawURL,
             certificateFingerprint: payload.certificateFingerprint
+        )
+        let baseURL = try validatedBaseURL(for: manualEndpoint)
+        let transport = try transportFactory.makeTransport(
+            certificateFingerprint: manualEndpoint.certificateFingerprint
         )
         let body = PairClaimRequest(
             sessionID: payload.sessionID,
@@ -291,46 +386,69 @@ public struct BridgeClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
+        return try await claimCredentials(
+            request: request,
+            transport: transport,
+            store: store
+        )
+    }
 
-        let data: Data
-        let response: HTTPURLResponse
-        do {
-            (data, response) = try await transport.send(request)
-        } catch {
-            if Self.isAmbiguousTransportError(error) {
-                throw BridgeError.resultUnknown
-            }
-            throw BridgeError.transportUnavailable
-        }
-        guard (200 ... 299).contains(response.statusCode) else {
-            throw BridgeError.httpStatus(response.statusCode)
-        }
-        let decoded: PairClaimResponse
-        do {
-            decoded = try JSONDecoder().decode(PairClaimResponse.self, from: data)
-        } catch {
+    public static func completePairing(
+        challenge: PairingChallenge,
+        response: PairingChallengeResponse,
+        endpoint: BridgeEndpoint,
+        store: KeychainDeviceStore,
+        now: Date = Date(),
+        transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory()
+    ) async throws -> DeviceCredentials {
+        try challenge.validateFreshness(now: now)
+        try response.validateFreshness(now: now)
+        guard challenge.sessionID == response.sessionID else {
             throw BridgeError.invalidPairingResponse
         }
-        guard
-            decoded.version == 1,
-            !decoded.deviceID.isEmpty,
-            let secret = Self.decodeURLSafeBase64(decoded.deviceSecret),
-            secret.count == 32
-        else {
+        guard challenge.pairingCode == response.pairingCode else {
             throw BridgeError.invalidPairingResponse
         }
-        let credentials: DeviceCredentials
-        do {
-            credentials = try DeviceCredentials(
-                deviceID: decoded.deviceID,
-                secret: secret,
-                certificateFingerprint: payload.certificateFingerprint
-            )
-        } catch {
+        guard challenge.challengeNonce == response.challengeNonce else {
             throw BridgeError.invalidPairingResponse
         }
-        try store.save(credentials)
-        return credentials
+        if case let .discovered(discovery) = endpoint,
+           discovery.bridgeID != challenge.bridgeID {
+            throw BridgeError.invalidPairingResponse
+        }
+
+        let baseURL = try validatedBaseURL(for: endpoint)
+        let transport = try transportFactory.makeTransport(
+            certificateFingerprint: endpoint.certificateFingerprint
+        )
+        var request = URLRequest(
+            url: Self.endpoint(baseURL: baseURL, components: ["v1", "pair", "challenge"])
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(response)
+        return try await claimCredentials(
+            request: request,
+            transport: transport,
+            store: store
+        )
+    }
+
+    public static func decodeEvent(_ data: Data) throws -> BridgeEvent {
+        let decoder = JSONDecoder()
+        if let preview = try? decoder.decode(TaskPreview.self, from: data) {
+            return .preview(preview)
+        }
+        if let progress = try? decoder.decode(TaskProgress.self, from: data) {
+            return .progress(progress)
+        }
+        if let terminal = try? decoder.decode(TaskTerminalResult.self, from: data) {
+            return .terminal(terminal)
+        }
+        if let rejection = try? decoder.decode(TaskRejection.self, from: data) {
+            return .rejection(rejection)
+        }
+        throw BridgeError.invalidProtocolResponse
     }
 
     private func submitConfirmation(
@@ -340,11 +458,7 @@ public struct BridgeClient: Sendable {
         try requireOwner(authorization)
         try requireTarget(requestID, request: authorization)
         let url = endpoint(["v1", "tasks", requestID, "confirm"])
-        let urlRequest = try signedURLRequest(
-            url: url,
-            method: "POST",
-            request: authorization
-        )
+        let urlRequest = try signedURLRequest(url: url, method: "POST", request: authorization)
         return try await sendStateChanging(urlRequest)
     }
 
@@ -353,48 +467,40 @@ public struct BridgeClient: Sendable {
         method: String,
         request: BridgeRequest
     ) throws -> URLRequest {
-        let canonicalRequestData = try request.canonicalData()
-        let signature = try RequestSigner.signature(
-            for: canonicalRequestData,
-            secret: credentials.secret
-        )
+        let signature = try RequestSigner.signature(for: request, secret: credentials.secret)
+        let envelope = try SignedRequestEnvelope(request: request, signature: signature)
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.httpBody = signedEnvelopeData(
-            requestData: canonicalRequestData,
-            signature: signature
-        )
+        urlRequest.httpBody = try JSONEncoder().encode(envelope)
         return urlRequest
     }
 
-    private func signedEnvelopeData(requestData: Data, signature: String) -> Data {
-        var envelope = Data(#"{"request":"#.utf8)
-        envelope.append(requestData)
-        envelope.append(Data(",\"signature\":\"".utf8))
-        envelope.append(Data(signature.utf8))
-        envelope.append(Data(#""}"#.utf8))
-        return envelope
-    }
-
     private func sendStateChanging(_ request: URLRequest) async throws -> BridgeResponse {
-        let data: Data
-        let response: HTTPURLResponse
+        await stateStore.update(.connecting(endpoint: endpointSelection, deviceID: credentials.deviceID))
         do {
-            (data, response) = try await transport.send(request)
+            let (data, response) = try await transport.send(request)
+            let decoded = try decodeResponse(data: data, response: response)
+            await stateStore.update(.connected(endpoint: endpointSelection, deviceID: credentials.deviceID))
+            return decoded
         } catch {
             if Self.isAmbiguousTransportError(error) {
+                await markDisconnected(canRetryReads: true)
                 throw BridgeError.resultUnknown
             }
+            if let bridgeError = error as? BridgeError {
+                switch bridgeError {
+                case .requestRejected, .httpStatus:
+                    await stateStore.update(
+                        .connected(endpoint: endpointSelection, deviceID: credentials.deviceID)
+                    )
+                default:
+                    await markDisconnected(canRetryReads: true)
+                }
+                throw bridgeError
+            }
+            await markDisconnected(canRetryReads: true)
             throw BridgeError.transportUnavailable
-        }
-        guard (200 ... 299).contains(response.statusCode) else {
-            throw BridgeError.httpStatus(response.statusCode)
-        }
-        do {
-            return try JSONDecoder().decode(BridgeResponse.self, from: data)
-        } catch {
-            throw BridgeError.resultUnknown
         }
     }
 
@@ -402,28 +508,106 @@ public struct BridgeClient: Sendable {
         var attempt = 0
         while attempt < retryPolicy.maximumReadAttempts {
             attempt += 1
+            await stateStore.update(.connecting(endpoint: endpointSelection, deviceID: credentials.deviceID))
             do {
                 let (data, response) = try await transport.send(request)
-                guard (200 ... 299).contains(response.statusCode) else {
-                    throw BridgeError.httpStatus(response.statusCode)
-                }
-                do {
-                    return try JSONDecoder().decode(BridgeResponse.self, from: data)
-                } catch {
-                    throw BridgeError.invalidProtocolResponse
-                }
+                let decoded = try decodeResponse(data: data, response: response)
+                await stateStore.update(
+                    .connected(endpoint: endpointSelection, deviceID: credentials.deviceID)
+                )
+                return decoded
             } catch {
-                if Self.isAmbiguousTransportError(error),
-                   attempt < retryPolicy.maximumReadAttempts {
-                    continue
+                if Self.isAmbiguousTransportError(error) {
+                    await markDisconnected(canRetryReads: true)
+                    if attempt < retryPolicy.maximumReadAttempts {
+                        continue
+                    }
+                    throw BridgeError.transportUnavailable
                 }
                 if let bridgeError = error as? BridgeError {
+                    if case .requestRejected = bridgeError {
+                        await stateStore.update(
+                            .connected(endpoint: endpointSelection, deviceID: credentials.deviceID)
+                        )
+                    }
                     throw bridgeError
                 }
+                await markDisconnected(canRetryReads: true)
                 throw BridgeError.transportUnavailable
             }
         }
+        await markDisconnected(canRetryReads: true)
         throw BridgeError.transportUnavailable
+    }
+
+    private func decodeResponse(
+        data: Data,
+        response: HTTPURLResponse
+    ) throws -> BridgeResponse {
+        let decoder = JSONDecoder()
+        if let rejection = try? decoder.decode(TaskRejection.self, from: data) {
+            throw BridgeError.requestRejected(rejection)
+        }
+        if let direct = try? decoder.decode(BridgeResponse.self, from: data) {
+            return direct
+        }
+        if let preview = try? decoder.decode(TaskPreview.self, from: data) {
+            return try bridgeResponse(from: preview)
+        }
+        if let progress = try? decoder.decode(TaskProgress.self, from: data) {
+            return try bridgeResponse(from: progress)
+        }
+        if let terminal = try? decoder.decode(TaskTerminalResult.self, from: data) {
+            return try bridgeResponse(from: terminal)
+        }
+        guard (200 ... 299).contains(response.statusCode) else {
+            throw BridgeError.httpStatus(response.statusCode)
+        }
+        throw BridgeError.invalidProtocolResponse
+    }
+
+    private func bridgeResponse(from preview: TaskPreview) throws -> BridgeResponse {
+        try BridgeResponse(
+            version: preview.version,
+            requestID: preview.requestID,
+            state: .awaitingConfirmation,
+            risk: preview.risk,
+            payload: [
+                "task_id": .string(preview.taskID),
+                "title": .string(preview.title),
+                "summary": .string(preview.summary),
+                "action": .string(preview.action),
+                "target": .string(preview.target),
+                "arguments": .object(preview.arguments),
+            ]
+        )
+    }
+
+    private func bridgeResponse(from progress: TaskProgress) throws -> BridgeResponse {
+        try BridgeResponse(
+            version: progress.version,
+            requestID: progress.requestID,
+            state: progress.state,
+            risk: .low,
+            payload: [
+                "task_id": .string(progress.taskID),
+                "progress_message": .string(progress.progressMessage),
+                "event_index": .integer(Int64(progress.eventIndex)),
+            ]
+        )
+    }
+
+    private func bridgeResponse(from terminal: TaskTerminalResult) throws -> BridgeResponse {
+        var payload = terminal.output
+        payload["task_id"] = .string(terminal.taskID)
+        payload["summary"] = .string(terminal.summary)
+        return try BridgeResponse(
+            version: terminal.version,
+            requestID: terminal.requestID,
+            state: terminal.state,
+            risk: .low,
+            payload: payload
+        )
     }
 
     private func requireOwner(_ request: BridgeRequest) throws {
@@ -446,9 +630,74 @@ public struct BridgeClient: Sendable {
         Self.endpoint(baseURL: baseURL, components: components)
     }
 
+    private func markDisconnected(canRetryReads: Bool) async {
+        await stateStore.update(
+            .disconnected(
+                endpoint: endpointSelection,
+                deviceID: credentials.deviceID,
+                canRetryReads: canRetryReads
+            )
+        )
+    }
+
+    private static func validatedBaseURL(for endpoint: BridgeEndpoint) throws -> URL {
+        guard let rawURL = endpoint.resolvedURL else {
+            throw BridgeError.invalidBridgeURL
+        }
+        return try BridgeURLValidator.validate(rawURL)
+    }
+
     private static func endpoint(baseURL: URL, components: [String]) -> URL {
         components.reduce(baseURL) { partial, component in
             partial.appendingPathComponent(component, isDirectory: false)
+        }
+    }
+
+    private static func claimCredentials(
+        request: URLRequest,
+        transport: any BridgeTransport,
+        store: KeychainDeviceStore
+    ) async throws -> DeviceCredentials {
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.send(request)
+        } catch {
+            if isAmbiguousTransportError(error) {
+                throw BridgeError.resultUnknown
+            }
+            throw BridgeError.transportUnavailable
+        }
+        if let rejection = try? JSONDecoder().decode(TaskRejection.self, from: data) {
+            throw BridgeError.requestRejected(rejection)
+        }
+        guard (200 ... 299).contains(response.statusCode) else {
+            throw BridgeError.httpStatus(response.statusCode)
+        }
+        let credentials = try decodePairClaimResponse(data)
+        try store.save(credentials)
+        return credentials
+    }
+
+    private static func decodePairClaimResponse(_ data: Data) throws -> DeviceCredentials {
+        let decoded: PairClaimResponse
+        do {
+            decoded = try JSONDecoder().decode(PairClaimResponse.self, from: data)
+        } catch {
+            throw BridgeError.invalidPairingResponse
+        }
+        guard
+            decoded.version == 1,
+            !decoded.deviceID.isEmpty,
+            let secret = decodeURLSafeBase64(decoded.deviceSecret),
+            secret.count == 32
+        else {
+            throw BridgeError.invalidPairingResponse
+        }
+        do {
+            return try DeviceCredentials(deviceID: decoded.deviceID, secret: secret)
+        } catch {
+            throw BridgeError.invalidPairingResponse
         }
     }
 
@@ -479,6 +728,22 @@ extension BridgeClient: CustomStringConvertible, CustomDebugStringConvertible {
     }
 
     public var debugDescription: String { description }
+}
+
+private actor BridgeConnectionStateStore {
+    private var state: BridgeConnectionState
+
+    init(initial: BridgeConnectionState) {
+        state = initial
+    }
+
+    func current() -> BridgeConnectionState {
+        state
+    }
+
+    func update(_ next: BridgeConnectionState) {
+        state = next
+    }
 }
 
 private struct PairClaimRequest: Encodable {
