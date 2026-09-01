@@ -3,6 +3,15 @@ import XCTest
 @testable import JarvisProtocol
 
 final class RequestSignerTests: XCTestCase {
+    func testCanonicalSigningPayloadMatchesCanonicalRequestBytes() throws {
+        let request = try Fixtures.openWeChatRequest()
+
+        XCTAssertEqual(
+            try RequestSigner.canonicalSigningPayload(for: request),
+            request.canonicalData()
+        )
+    }
+
     func testHMACMatchesPythonFixtureAndUsesLowercaseHex() throws {
         let request = try Fixtures.openWeChatRequest()
         let secret = Data("0123456789abcdef0123456789abcdef".utf8)
@@ -50,5 +59,52 @@ final class RequestSignerTests: XCTestCase {
                 XCTAssertEqual(error as? BridgeProtocolError, .invalidSignature)
             }
         }
+    }
+
+    func testVerifyRejectsStaleRequestMetadata() throws {
+        let request = try BridgeRequest(
+            version: 1,
+            requestID: "req-1",
+            deviceID: "iphone-1",
+            issuedAt: "2026-09-01T08:40:00Z",
+            idempotencyKey: "idem-1",
+            kind: .tool,
+            payload: ["tool": .string("open_application")]
+        )
+
+        XCTAssertThrowsError(
+            try RequestSigner.validateRequestMetadata(
+                request,
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .staleMessage(field: "issued_at")
+            )
+        }
+    }
+
+    func testVerifyAcceptsFreshRequestMetadata() throws {
+        let request = try BridgeRequest(
+            version: 1,
+            requestID: "req-1",
+            deviceID: "iphone-1",
+            issuedAt: "2026-09-01T08:59:30Z",
+            idempotencyKey: "idem-1",
+            kind: .tool,
+            payload: ["tool": .string("open_application")]
+        )
+
+        XCTAssertNoThrow(
+            try RequestSigner.validateRequestMetadata(
+                request,
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        )
     }
 }

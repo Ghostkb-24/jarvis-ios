@@ -3,6 +3,177 @@ import XCTest
 @testable import JarvisProtocol
 
 final class BridgeModelsTests: XCTestCase {
+    func testDiscoveryMessageUsesExpectedWireFields() throws {
+        let message = try DiscoveryMessage(
+            version: 1,
+            bridgeID: "bridge-1",
+            bridgeURL: "https://jarvis.local:8443",
+            certificateFingerprint: String(repeating: "ab", count: 32),
+            displayName: "Jarvis Desktop",
+            requiresPairing: true
+        )
+
+        let encoded = try JSONEncoder().encode(message)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        XCTAssertEqual(
+            Set(object.keys),
+            Set([
+                "version",
+                "bridge_id",
+                "bridge_url",
+                "certificate_sha256",
+                "display_name",
+                "requires_pairing",
+            ])
+        )
+    }
+
+    func testPairingChallengeRoundTrips() throws {
+        let challenge = try PairingChallenge(
+            version: 1,
+            sessionID: "session-1",
+            bridgeID: "bridge-1",
+            pairingCode: "493821",
+            challengeNonce: "nonce-1",
+            issuedAt: "2026-09-01T09:00:00Z",
+            expiresAt: "2026-09-01T09:05:00Z"
+        )
+
+        let data = try JSONEncoder().encode(challenge)
+        let decoded = try JSONDecoder().decode(PairingChallenge.self, from: data)
+
+        XCTAssertEqual(decoded, challenge)
+    }
+
+    func testPairingChallengeResponseRejectsUnknownFields() {
+        let data = Data(#"{"version":1,"session_id":"session-1","device_name":"iPhone","pairing_code":"493821","challenge_nonce":"nonce-1","issued_at":"2026-09-01T09:00:00Z","unexpected":true}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(PairingChallengeResponse.self, from: data)) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .unknownFields(type: "PairingChallengeResponse", fields: ["unexpected"])
+            )
+        }
+    }
+
+    func testTaskSubmissionCarriesRequestAndIdempotencyIdentifiers() throws {
+        let submission = try TaskSubmission(
+            request: Fixtures.openWeChatRequest(),
+            expectsConfirmation: true
+        )
+
+        XCTAssertEqual(submission.request.requestID, "req-1")
+        XCTAssertEqual(submission.request.idempotencyKey, "idem-1")
+        XCTAssertTrue(submission.expectsConfirmation)
+    }
+
+    func testTaskPreviewRoundTripsExplicitConfirmationPayload() throws {
+        let preview = try TaskPreview(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            risk: .confirmationRequired,
+            title: "Open WeChat",
+            summary: "Jarvis will open WeChat on this computer.",
+            action: "open_application",
+            target: "WeChat",
+            arguments: ["name": .string("微信")]
+        )
+
+        let data = try JSONEncoder().encode(preview)
+        let decoded = try JSONDecoder().decode(TaskPreview.self, from: data)
+
+        XCTAssertEqual(decoded, preview)
+    }
+
+    func testTaskConfirmationRequiresExplicitDecision() throws {
+        let confirmation = try TaskConfirmation(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            decision: .approve,
+            decidedAt: "2026-09-01T09:01:00Z"
+        )
+
+        XCTAssertEqual(confirmation.decision, .approve)
+    }
+
+    func testTaskProgressAndTerminalResultRoundTrip() throws {
+        let progress = try TaskProgress(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            state: .executing,
+            progressMessage: "Opening WeChat",
+            eventIndex: 2
+        )
+        let result = try TaskTerminalResult(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            state: .completed,
+            summary: "WeChat opened",
+            output: ["ok": .bool(true)]
+        )
+
+        XCTAssertEqual(try JSONDecoder().decode(TaskProgress.self, from: JSONEncoder().encode(progress)), progress)
+        XCTAssertEqual(try JSONDecoder().decode(TaskTerminalResult.self, from: JSONEncoder().encode(result)), result)
+    }
+
+    func testRejectedTaskUsesExplicitReasonCode() throws {
+        let rejection = try TaskRejection(
+            version: 1,
+            requestID: "req-1",
+            taskID: "task-1",
+            reason: .paymentBlocked,
+            message: "Payments stay blocked on mobile control.",
+            retryable: false
+        )
+
+        XCTAssertEqual(rejection.reason, .paymentBlocked)
+        XCTAssertEqual(
+            try JSONDecoder().decode(TaskRejection.self, from: JSONEncoder().encode(rejection)),
+            rejection
+        )
+    }
+
+    func testStaleTimestampsAreRejectedByValidation() throws {
+        XCTAssertThrowsError(
+            try ProtocolValidation.validateTimestamp(
+                "2026-09-01T08:40:00Z",
+                field: "issued_at",
+                now: Date(timeIntervalSince1970: 1_788_251_400),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .staleMessage(field: "issued_at")
+            )
+        }
+    }
+
+    func testMalformedTimestampsAreRejectedByValidation() throws {
+        XCTAssertThrowsError(
+            try ProtocolValidation.validateTimestamp(
+                "09/01/2026 08:40",
+                field: "issued_at",
+                now: Date(),
+                maxAge: 300,
+                maxFutureSkew: 30
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? BridgeProtocolError,
+                .invalidTimestamp(field: "issued_at")
+            )
+        }
+    }
+
     func testCanonicalPayloadMatchesPythonFixture() throws {
         let request = try Fixtures.openWeChatRequest()
 
@@ -141,6 +312,20 @@ final class BridgeModelsTests: XCTestCase {
 
         XCTAssertFalse(String(describing: request).contains("never-log-this-message"))
         XCTAssertFalse(String(reflecting: request).contains("never-log-this-message"))
+    }
+
+    func testSignedRequestEnvelopeUsesStableWireNames() throws {
+        let envelope = try SignedRequestEnvelope(
+            request: Fixtures.openWeChatRequest(),
+            signature: String(repeating: "a", count: 64)
+        )
+
+        let encoded = try JSONEncoder().encode(envelope)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        XCTAssertEqual(Set(object.keys), Set(["request", "signature"]))
     }
 }
 
