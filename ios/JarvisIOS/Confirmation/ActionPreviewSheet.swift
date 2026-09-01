@@ -20,56 +20,74 @@ struct ActionPreviewSheet: View {
                     HStack(alignment: .top, spacing: 13) {
                         Image(systemName: "exclamationmark.shield.fill")
                             .font(.title2)
-                            .foregroundStyle(JarvisTheme.warning)
+                            .foregroundStyle(preview.allowsApproval ? JarvisTheme.warning : JarvisTheme.error)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("发送前请确认")
+                            Text(preview.title)
                                 .font(.title2.bold())
                                 .foregroundStyle(JarvisTheme.primaryText)
-                            Text("这是一次对外发送操作。只有你允许后，Jarvis 才会继续。")
+                            Text(preview.summary)
                                 .font(.subheadline)
                                 .foregroundStyle(JarvisTheme.secondaryText)
                         }
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
-                        previewLabel("收件人")
-                        Text("收件人：\(preview.recipient)")
+                        previewLabel("目标应用")
+                        Text(preview.target)
                             .font(.body.weight(.semibold))
                             .foregroundStyle(JarvisTheme.primaryText)
-                            .textSelection(.enabled)
 
                         Divider().overlay(Color.white.opacity(0.10))
 
-                        previewLabel("完整消息")
-                        Text(preview.message)
-                            .font(.body)
+                        previewLabel("操作")
+                        Text(preview.action)
+                            .font(.body.weight(.semibold))
                             .foregroundStyle(JarvisTheme.primaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+
+                        Divider().overlay(Color.white.opacity(0.10))
+
+                        ForEach(preview.details) { detail in
+                            previewLabel(detail.label)
+                            Text("\(detail.label)：\(detail.value)")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(JarvisTheme.primaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+
+                            if detail.id != preview.details.last?.id {
+                                Divider().overlay(Color.white.opacity(0.10))
+                            }
+                        }
                     }
                     .jarvisCard()
 
-                    Text("请逐字核对。取消后不会联系电脑客户端，也不会发送消息。")
+                    Text(
+                        preview.allowsApproval
+                            ? "请逐字核对。取消后不会联系电脑客户端，也不会发送消息。"
+                            : "这类操作保持人工执行。Jarvis 不会绕过付款、删除文件或密码输入限制。"
+                    )
                         .font(.footnote)
                         .foregroundStyle(JarvisTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
 
                     VStack(spacing: 12) {
-                        Button(action: onAllow) {
-                            Text("允许并发送")
-                                .font(.headline)
-                                .foregroundStyle(Color.black)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                                .background(JarvisTheme.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        if preview.allowsApproval {
+                            Button(action: onAllow) {
+                                Text(preview.primaryButtonTitle)
+                                    .font(.headline)
+                                    .foregroundStyle(Color.black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(JarvisTheme.accent)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(preview.primaryButtonTitle)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("允许并发送")
 
-                        Button(role: .cancel, action: onCancel) {
-                            Text("取消操作")
+                        Button(role: preview.allowsApproval ? .cancel : nil, action: onCancel) {
+                            Text(preview.allowsApproval ? "取消操作" : "知道了")
                                 .font(.headline)
                                 .foregroundStyle(JarvisTheme.primaryText)
                                 .frame(maxWidth: .infinity)
@@ -78,7 +96,7 @@ struct ActionPreviewSheet: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("取消操作")
+                        .accessibilityLabel(preview.allowsApproval ? "取消操作" : "知道了")
                     }
                 }
                 .padding(.horizontal, 20)

@@ -5,18 +5,61 @@ import JarvisProtocol
 import WidgetKit
 
 protocol JarvisBridgeClient: Sendable {
+    func connectionState() async -> BridgeConnectionState
     func submit(_ request: BridgeRequest) async throws -> BridgeResponse
     func confirm(_ requestID: String, confirmation: BridgeRequest) async throws -> BridgeResponse
+    func cancel(_ requestID: String, cancellation: BridgeRequest) async throws -> BridgeResponse
 }
 
 extension BridgeClient: JarvisBridgeClient {}
 
 struct ActionPreview: Identifiable, Equatable, Sendable {
+    enum Mode: Equatable, Sendable {
+        case approval
+        case blocked(RejectionReason)
+    }
+
+    struct Detail: Identifiable, Equatable, Sendable {
+        let label: String
+        let value: String
+
+        var id: String { label }
+    }
+
     let requestID: String
-    let recipient: String
-    let message: String
+    let taskID: String
+    let title: String
+    let summary: String
+    let action: String
+    let target: String
+    let details: [Detail]
+    let mode: Mode
+
+    var recipient: String {
+        details.first(where: { $0.label == "收件人" })?.value ?? target
+    }
+
+    var message: String {
+        details.first(where: { $0.label == "完整消息" })?.value
+            ?? details.first(where: { $0.label == "内容" })?.value
+            ?? summary
+    }
 
     var id: String { requestID }
+
+    var allowsApproval: Bool {
+        if case .approval = mode { return true }
+        return false
+    }
+
+    var refusalReason: RejectionReason? {
+        guard case let .blocked(reason) = mode else { return nil }
+        return reason
+    }
+
+    var primaryButtonTitle: String {
+        allowsApproval ? "允许并发送" : "知道了"
+    }
 }
 
 struct ConversationMessage: Identifiable, Equatable, Sendable {
@@ -61,16 +104,33 @@ struct JarvisTaskSummary: Identifiable, Equatable, Sendable {
 struct DeviceSnapshot: Equatable, Sendable {
     let computerName: String
     let isConnected: Bool
+    let isPaired: Bool
     let isCertificatePinned: Bool
+    let connectionStatus: String
+    let pairingStatus: String
     let modelStatus: String
     let networkStatus: String
 
     static let offline = DeviceSnapshot(
         computerName: "Windows 电脑",
         isConnected: false,
+        isPaired: true,
         isCertificatePinned: false,
+        connectionStatus: "电脑离线",
+        pairingStatus: "已配对",
         modelStatus: "本地模型不可用",
         networkStatus: "等待同一 Wi-Fi 连接"
+    )
+
+    static let unpaired = DeviceSnapshot(
+        computerName: "Windows 电脑",
+        isConnected: false,
+        isPaired: false,
+        isCertificatePinned: false,
+        connectionStatus: "需要配对",
+        pairingStatus: "未配对",
+        modelStatus: "等待配对后检查",
+        networkStatus: "同一 Wi-Fi 上可发现电脑"
     )
 }
 
@@ -156,8 +216,8 @@ public final class AppModel: ObservableObject {
                 "正在识别"
             case .thinking:
                 "正在思考"
-            case .awaitingConfirmation:
-                "等待你的确认"
+            case let .awaitingConfirmation(preview):
+                preview.allowsApproval ? "等待你的确认" : "无法执行该操作"
             case .executing:
                 "正在执行"
             case .completed:
@@ -181,8 +241,10 @@ public final class AppModel: ObservableObject {
                 "正在把语音转换为文字"
             case .thinking:
                 "正在通过本地 Jarvis 处理请求"
-            case .awaitingConfirmation:
-                "请核对目标和完整内容后再继续"
+            case let .awaitingConfirmation(preview):
+                preview.allowsApproval
+                    ? "请核对目标和完整内容后再继续"
+                    : preview.summary
             case .executing:
                 "电脑正在执行已允许的操作"
             case .completed:
@@ -290,7 +352,8 @@ public final class AppModel: ObservableObject {
         device: DeviceSnapshot = .offline,
         isUITesting: Bool = false,
         speechSession: SpeechSession? = nil,
-        widgetSnapshotWriter: (any WidgetSnapshotWriting)? = nil
+        widgetSnapshotWriter: (any WidgetSnapshotWriting)? = nil,
+        syncBridgeStateOnInit: Bool = true
     ) {
         self.client = client
         self.deviceID = deviceID
@@ -303,9 +366,31 @@ public final class AppModel: ObservableObject {
         self.widgetSnapshotWriter = widgetSnapshotWriter
         speechPermissionStatus = speechSession?.permissionStatus ?? .undetermined
         widgetSnapshotWriter?.save(device)
+        if syncBridgeStateOnInit {
+            refreshConnectionState()
+        }
     }
 
     var isConnected: Bool { device.isConnected }
+    var statusTitle: String {
+        if !device.isPaired {
+            return "等待完成配对"
+        }
+        if device.connectionStatus == "正在连接" {
+            return "正在连接电脑"
+        }
+        return phase.title
+    }
+
+    var statusDetail: String {
+        if !device.isPaired {
+            return "请先在设备页完成同一 Wi-Fi 配对"
+        }
+        if device.connectionStatus == "正在连接" {
+            return "正在校验局域网桥接与设备身份"
+        }
+        return phase.detail
+    }
 
     var pendingAction: ActionPreview? {
         guard case let .awaitingConfirmation(preview) = phase else { return nil }
@@ -325,7 +410,10 @@ public final class AppModel: ObservableObject {
         let connectedDevice = DeviceSnapshot(
             computerName: "工作室 Windows",
             isConnected: true,
+            isPaired: true,
             isCertificatePinned: true,
+            connectionStatus: "已连接",
+            pairingStatus: "已配对",
             modelStatus: "本地模型就绪",
             networkStatus: "同一 Wi-Fi · 加密连接"
         )
@@ -358,13 +446,22 @@ public final class AppModel: ObservableObject {
                 messages: sampleMessages,
                 tasks: sampleTasks,
                 device: connectedDevice,
-                isUITesting: true
+                isUITesting: true,
+                syncBridgeStateOnInit: false
             )
         case "confirmation":
             let preview = ActionPreview(
                 requestID: "ui-confirm-1",
-                recipient: "宋小宝",
-                message: "明天上午十点在工作室见，记得带上最终版方案。"
+                taskID: "ui-task-1",
+                title: "发送微信消息",
+                summary: "发送前请你确认",
+                action: "发送消息",
+                target: "微信",
+                details: [
+                    .init(label: "收件人", value: "宋小宝"),
+                    .init(label: "完整消息", value: "明天上午十点在工作室见，记得带上最终版方案。"),
+                ],
+                mode: .approval
             )
             return AppModel(
                 client: fixtureClient,
@@ -373,7 +470,8 @@ public final class AppModel: ObservableObject {
                 messages: sampleMessages,
                 tasks: sampleTasks,
                 device: connectedDevice,
-                isUITesting: true
+                isUITesting: true,
+                syncBridgeStateOnInit: false
             )
         case "result-unknown":
             return AppModel(
@@ -383,7 +481,64 @@ public final class AppModel: ObservableObject {
                 messages: sampleMessages,
                 tasks: sampleTasks,
                 device: connectedDevice,
-                isUITesting: true
+                isUITesting: true,
+                syncBridgeStateOnInit: false
+            )
+        case "unpaired":
+            return AppModel(
+                client: fixtureClient,
+                deviceID: "ui-test-iphone",
+                phase: .offline,
+                messages: sampleMessages,
+                tasks: sampleTasks,
+                device: .unpaired,
+                isUITesting: true,
+                syncBridgeStateOnInit: false
+            )
+        case "failed":
+            return AppModel(
+                client: fixtureClient,
+                deviceID: "ui-test-iphone",
+                phase: .failed,
+                messages: sampleMessages,
+                tasks: sampleTasks,
+                device: connectedDevice,
+                isUITesting: true,
+                syncBridgeStateOnInit: false
+            ).withNotice("Bridge 拒绝了这次请求")
+        case "succeeded":
+            return AppModel(
+                client: fixtureClient,
+                deviceID: "ui-test-iphone",
+                phase: .completed,
+                messages: sampleMessages,
+                tasks: sampleTasks,
+                device: connectedDevice,
+                isUITesting: true,
+                syncBridgeStateOnInit: false
+            ).withNotice("测试请求已安全完成")
+        case "blocked-payment":
+            let preview = ActionPreview(
+                requestID: "ui-blocked-1",
+                taskID: "ui-task-2",
+                title: "无法执行该操作",
+                summary: "涉及付款，Jarvis 不会代你确认或付款。",
+                action: "付款",
+                target: "支付应用",
+                details: [
+                    .init(label: "原因", value: "付款类操作保持拒绝策略"),
+                ],
+                mode: .blocked(.paymentBlocked)
+            )
+            return AppModel(
+                client: fixtureClient,
+                deviceID: "ui-test-iphone",
+                phase: .awaitingConfirmation(preview),
+                messages: sampleMessages,
+                tasks: sampleTasks,
+                device: connectedDevice,
+                isUITesting: true,
+                syncBridgeStateOnInit: false
             )
         default:
             return AppModel(
@@ -391,7 +546,8 @@ public final class AppModel: ObservableObject {
                 messages: sampleMessages,
                 tasks: sampleTasks,
                 device: .offline,
-                isUITesting: true
+                isUITesting: true,
+                syncBridgeStateOnInit: false
             )
         }
     }
@@ -437,6 +593,10 @@ public final class AppModel: ObservableObject {
                     self.receiveSpeechFailure(error, ownedBy: generation)
                 }
             }
+        case _ where !device.isPaired:
+            notice = "请先完成同一 Wi-Fi 配对"
+        case _ where device.connectionStatus == "正在连接":
+            notice = "正在连接电脑，请稍候"
         case .offline:
             beginVoiceStart(with: speechSession)
         case .thinking, .awaitingConfirmation, .executing:
@@ -512,6 +672,10 @@ public final class AppModel: ObservableObject {
         case .listening:
             notice = nil
             _ = transition(to: .transcribing)
+        case _ where !device.isPaired:
+            notice = "请先完成同一 Wi-Fi 配对"
+        case _ where device.connectionStatus == "正在连接":
+            notice = "正在连接电脑，请稍候"
         case .offline:
             notice = "电脑离线，语音草稿不会自动发送"
         case .thinking, .awaitingConfirmation, .executing:
@@ -648,6 +812,10 @@ public final class AppModel: ObservableObject {
     public func submit(text: String) -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return false }
+        if !device.isPaired {
+            notice = "请先完成同一 Wi-Fi 配对"
+            return false
+        }
         guard !isRequestingSpeechPermission else {
             notice = "请先完成语音权限选择"
             return false
@@ -681,6 +849,10 @@ public final class AppModel: ObservableObject {
 
     @discardableResult
     public func submit(proposal: RemoteToolProposal) -> Bool {
+        if !device.isPaired {
+            notice = "请先完成同一 Wi-Fi 配对"
+            return false
+        }
         guard !isRequestingSpeechPermission else {
             notice = "请先完成语音权限选择"
             return false
@@ -711,6 +883,7 @@ public final class AppModel: ObservableObject {
 
     func allow(_ preview: ActionPreview) {
         guard pendingAction == preview else { return }
+        guard preview.allowsApproval else { return }
         guard let client, isConnected else {
             invalidateActiveOperation()
             _ = transition(to: .offline)
@@ -739,6 +912,8 @@ public final class AppModel: ObservableObject {
                     confirmation: confirmation
                 )
                 self.apply(response, ownedBy: generation)
+            } catch BridgeError.requestRejected(let rejection) {
+                self.receiveRejection(rejection, ownedBy: generation)
             } catch BridgeError.resultUnknown {
                 self.receiveResultUnknown(ownedBy: generation)
             } catch {
@@ -752,9 +927,52 @@ public final class AppModel: ObservableObject {
 
     func cancelPreview(_ preview: ActionPreview) {
         guard pendingAction == preview else { return }
-        invalidateActiveOperation()
-        _ = transition(to: .idle)
-        notice = "已取消，未执行"
+        guard preview.allowsApproval else {
+            invalidateActiveOperation()
+            _ = transition(to: .failed)
+            notice = preview.summary
+            return
+        }
+        guard let client, isConnected else {
+            invalidateActiveOperation()
+            _ = transition(to: .idle)
+            notice = "已取消，未执行"
+            return
+        }
+
+        let cancellation: BridgeRequest
+        do {
+            cancellation = try makeRequest(
+                kind: .cancel,
+                payload: ["target_request_id": .string(preview.requestID)]
+            )
+        } catch {
+            notice = "无法创建取消请求"
+            return
+        }
+        guard let generation = beginConfirmationOperation() else { return }
+
+        notice = nil
+        testingClientCallCount += 1
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let response = try await client.cancel(
+                    preview.requestID,
+                    cancellation: cancellation
+                )
+                self.apply(response, ownedBy: generation)
+            } catch BridgeError.requestRejected(let rejection) {
+                self.receiveRejection(rejection, ownedBy: generation)
+            } catch BridgeError.resultUnknown {
+                self.receiveResultUnknown(ownedBy: generation)
+            } catch {
+                self.receiveFailure(
+                    "取消请求未完成",
+                    ownedBy: generation
+                )
+            }
+        }
     }
 
     private func startSubmission(
@@ -774,6 +992,8 @@ public final class AppModel: ObservableObject {
             do {
                 let response = try await client.submit(request)
                 self.apply(response, ownedBy: generation)
+            } catch BridgeError.requestRejected(let rejection) {
+                self.receiveRejection(rejection, ownedBy: generation)
             } catch BridgeError.resultUnknown {
                 self.receiveResultUnknown(ownedBy: generation)
             } catch {
@@ -788,6 +1008,13 @@ public final class AppModel: ObservableObject {
 
         switch response.state {
         case .preparing:
+            updateTask(
+                taskID: stringValue(response.payload["task_id"]) ?? response.requestID,
+                title: stringValue(response.payload["title"]) ?? "请求已提交",
+                detail: stringValue(response.payload["progress_message"]) ?? "等待执行",
+                status: "准备中",
+                symbol: "ellipsis.circle.fill"
+            )
             _ = transition(to: .thinking, ownedBy: generation)
         case .awaitingConfirmation:
             guard let preview = actionPreview(from: response) else {
@@ -796,11 +1023,32 @@ public final class AppModel: ObservableObject {
                 finishOperation(generation)
                 return
             }
+            updateTask(
+                taskID: preview.taskID,
+                title: preview.title,
+                detail: preview.summary,
+                status: preview.allowsApproval ? "等待确认" : "已拒绝",
+                symbol: preview.allowsApproval ? "exclamationmark.shield.fill" : "xmark.shield.fill"
+            )
             _ = transition(to: .awaitingConfirmation(preview), ownedBy: generation)
         case .executing:
+            updateTask(
+                taskID: stringValue(response.payload["task_id"]) ?? response.requestID,
+                title: "请求执行中",
+                detail: stringValue(response.payload["progress_message"]) ?? "电脑正在执行",
+                status: "执行中",
+                symbol: "bolt.circle.fill"
+            )
             _ = transition(to: .executing, ownedBy: generation)
         case .completed:
             guard transition(to: .completed, ownedBy: generation) else { return }
+            updateTask(
+                taskID: stringValue(response.payload["task_id"]) ?? response.requestID,
+                title: stringValue(response.payload["summary"]) ?? "请求已完成",
+                detail: stringValue(response.payload["summary"]) ?? "操作已安全完成",
+                status: "已完成",
+                symbol: "checkmark.circle.fill"
+            )
             if let summary = stringValue(response.payload["summary"]), !summary.isEmpty {
                 messages.append(ConversationMessage(author: .jarvis, text: summary))
             }
@@ -808,10 +1056,24 @@ public final class AppModel: ObservableObject {
         case .failed:
             guard transition(to: .failed, ownedBy: generation) else { return }
             notice = stringValue(response.payload["summary"])
+            updateTask(
+                taskID: stringValue(response.payload["task_id"]) ?? response.requestID,
+                title: "请求失败",
+                detail: stringValue(response.payload["summary"]) ?? "没有执行操作",
+                status: "失败",
+                symbol: "xmark.octagon.fill"
+            )
             finishOperation(generation)
         case .cancelled:
             guard transition(to: .idle, ownedBy: generation) else { return }
             notice = "已取消，未执行"
+            updateTask(
+                taskID: stringValue(response.payload["task_id"]) ?? response.requestID,
+                title: "操作已取消",
+                detail: "没有执行任何跨应用操作",
+                status: "已取消",
+                symbol: "slash.circle.fill"
+            )
             finishOperation(generation)
         case .resultUnknown:
             guard transition(to: .resultUnknown, ownedBy: generation) else { return }
@@ -861,6 +1123,32 @@ public final class AppModel: ObservableObject {
         guard activeGeneration == generation else { return }
         guard transition(to: .failed, ownedBy: generation) else { return }
         notice = message
+        updateTask(
+            taskID: UUID().uuidString,
+            title: "请求失败",
+            detail: message,
+            status: "失败",
+            symbol: "xmark.octagon.fill"
+        )
+        finishOperation(generation)
+    }
+
+    private func receiveRejection(_ rejection: TaskRejection, ownedBy generation: UInt64) {
+        guard activeGeneration == generation else { return }
+        if let preview = refusalPreview(from: rejection) {
+            _ = transition(to: .awaitingConfirmation(preview), ownedBy: generation)
+            finishOperation(generation)
+            return
+        }
+        guard transition(to: .failed, ownedBy: generation) else { return }
+        notice = rejection.message
+        updateTask(
+            taskID: rejection.taskID,
+            title: "请求被拒绝",
+            detail: rejection.message,
+            status: "已拒绝",
+            symbol: "xmark.shield.fill"
+        )
         finishOperation(generation)
     }
 
@@ -878,16 +1166,207 @@ public final class AppModel: ObservableObject {
         guard case let .object(arguments)? = response.payload["arguments"] else {
             return nil
         }
-        let recipient = stringValue(arguments["contact"])
-            ?? stringValue(arguments["recipient"])
-        guard let recipient, let message = stringValue(arguments["message"]) else {
+        guard
+            let taskID = stringValue(response.payload["task_id"]),
+            let title = stringValue(response.payload["title"]),
+            let summary = stringValue(response.payload["summary"]),
+            let action = stringValue(response.payload["action"]),
+            let target = stringValue(response.payload["target"])
+        else {
             return nil
         }
+        let details = previewDetails(arguments: arguments)
         return ActionPreview(
             requestID: response.requestID,
-            recipient: recipient,
-            message: message
+            taskID: taskID,
+            title: title,
+            summary: summary,
+            action: action,
+            target: target,
+            details: details,
+            mode: .approval
         )
+    }
+
+    private func previewDetails(arguments: [String: JSONValue]) -> [ActionPreview.Detail] {
+        var details: [ActionPreview.Detail] = []
+        if let recipient = stringValue(arguments["contact"]) ?? stringValue(arguments["recipient"]) {
+            details.append(.init(label: "收件人", value: recipient))
+        }
+        if let message = stringValue(arguments["message"]) {
+            details.append(.init(label: "完整消息", value: message))
+        }
+        if details.isEmpty {
+            for key in arguments.keys.sorted() {
+                if let value = stringValue(arguments[key]) {
+                    details.append(.init(label: key, value: value))
+                }
+            }
+        }
+        return details
+    }
+
+    private func refusalPreview(from rejection: TaskRejection) -> ActionPreview? {
+        let summary: String
+        switch rejection.reason {
+        case .paymentBlocked:
+            summary = "涉及付款，Jarvis 不会代你确认或付款。"
+        case .fileDeletionBlocked:
+            summary = "涉及删除文件，Jarvis 不会代你确认或删除。"
+        case .passwordEntryBlocked:
+            summary = "涉及密码输入，Jarvis 不会代你输入或确认。"
+        default:
+            return nil
+        }
+        updateTask(
+            taskID: rejection.taskID,
+            title: "请求被拒绝",
+            detail: rejection.message,
+            status: "已拒绝",
+            symbol: "xmark.shield.fill"
+        )
+        return ActionPreview(
+            requestID: rejection.requestID,
+            taskID: rejection.taskID,
+            title: "无法执行该操作",
+            summary: summary,
+            action: "安全拒绝",
+            target: "Jarvis 安全策略",
+            details: [.init(label: "原因", value: rejection.message)],
+            mode: .blocked(rejection.reason)
+        )
+    }
+
+    private func refreshConnectionState() {
+        guard let client else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let state = await client.connectionState()
+            self.apply(connectionState: state)
+        }
+    }
+
+    private func apply(connectionState: BridgeConnectionState) {
+        let snapshot: DeviceSnapshot
+        let nextPhase: Phase
+
+        switch connectionState {
+        case let .unpaired(endpoint):
+            snapshot = DeviceSnapshot(
+                computerName: displayName(for: endpoint),
+                isConnected: false,
+                isPaired: false,
+                isCertificatePinned: false,
+                connectionStatus: "需要配对",
+                pairingStatus: "未配对",
+                modelStatus: "等待配对后检查",
+                networkStatus: "同一 Wi-Fi 上可发现电脑"
+            )
+            nextPhase = .offline
+        case let .paired(endpoint, _):
+            snapshot = DeviceSnapshot(
+                computerName: displayName(for: endpoint),
+                isConnected: false,
+                isPaired: true,
+                isCertificatePinned: true,
+                connectionStatus: "电脑离线",
+                pairingStatus: "已配对",
+                modelStatus: "等待重新连接",
+                networkStatus: "同一 Wi-Fi · 已保存凭据"
+            )
+            nextPhase = .offline
+        case let .connecting(endpoint, _):
+            snapshot = DeviceSnapshot(
+                computerName: displayName(for: endpoint),
+                isConnected: false,
+                isPaired: true,
+                isCertificatePinned: true,
+                connectionStatus: "正在连接",
+                pairingStatus: "已配对",
+                modelStatus: "正在校验",
+                networkStatus: "同一 Wi-Fi · 建立安全连接中"
+            )
+            nextPhase = .offline
+        case let .connected(endpoint, _):
+            snapshot = DeviceSnapshot(
+                computerName: displayName(for: endpoint),
+                isConnected: true,
+                isPaired: true,
+                isCertificatePinned: true,
+                connectionStatus: "已连接",
+                pairingStatus: "已配对",
+                modelStatus: "本地模型就绪",
+                networkStatus: "同一 Wi-Fi · 加密连接"
+            )
+            nextPhase = .idle
+        case let .disconnected(endpoint, _, canRetryReads):
+            snapshot = DeviceSnapshot(
+                computerName: displayName(for: endpoint),
+                isConnected: false,
+                isPaired: true,
+                isCertificatePinned: true,
+                connectionStatus: "电脑离线",
+                pairingStatus: "已配对",
+                modelStatus: "等待重连",
+                networkStatus: canRetryReads ? "连接中断，可安全重试只读请求" : "连接中断"
+            )
+            nextPhase = .offline
+        }
+
+        device = snapshot
+        widgetSnapshotWriter?.save(snapshot)
+        if case .awaitingConfirmation = phase, snapshot.isConnected {
+            return
+        }
+        _ = transition(to: nextPhase)
+    }
+
+    private func displayName(for endpoint: BridgeEndpoint) -> String {
+        switch endpoint {
+        case let .discovered(message):
+            message.displayName
+        case let .manual(baseURL, _):
+            baseURL.host ?? "Windows 电脑"
+        }
+    }
+
+    private func updateTask(
+        taskID: String,
+        title: String,
+        detail: String,
+        status: String,
+        symbol: String
+    ) {
+        guard !taskID.isEmpty else { return }
+        let summary = JarvisTaskSummary(
+            id: stableTaskID(for: taskID),
+            title: title,
+            detail: detail,
+            status: status,
+            symbol: symbol
+        )
+        if let index = tasks.firstIndex(where: { $0.id == summary.id }) {
+            tasks[index] = summary
+        } else {
+            tasks.insert(summary, at: 0)
+        }
+    }
+
+    private func stableTaskID(for value: String) -> UUID {
+        if let existing = UUID(uuidString: value) {
+            return existing
+        }
+        var bytes = Array(value.utf8)
+        if bytes.count < 16 {
+            bytes += Array(repeating: 0, count: 16 - bytes.count)
+        }
+        bytes = Array(bytes.prefix(16))
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     private func makeRequest(
@@ -918,7 +1397,24 @@ public final class AppModel: ObservableObject {
     }
 }
 
+private extension AppModel {
+    func withNotice(_ value: String) -> AppModel {
+        notice = value
+        return self
+    }
+}
+
 private actor FixtureBridgeClient: JarvisBridgeClient {
+    func connectionState() async -> BridgeConnectionState {
+        .connected(
+            endpoint: .manual(
+                baseURL: URL(string: "https://jarvis.local")!,
+                certificateFingerprint: String(repeating: "a", count: 64)
+            ),
+            deviceID: "ui-test-iphone"
+        )
+    }
+
     func submit(_ request: BridgeRequest) async throws -> BridgeResponse {
         try BridgeResponse(
             version: 1,
@@ -942,4 +1438,16 @@ private actor FixtureBridgeClient: JarvisBridgeClient {
         )
     }
 
+    func cancel(
+        _ requestID: String,
+        cancellation: BridgeRequest
+    ) async throws -> BridgeResponse {
+        try BridgeResponse(
+            version: 1,
+            requestID: requestID,
+            state: .cancelled,
+            risk: .confirmationRequired,
+            payload: ["summary": .string("测试操作已取消")]
+        )
+    }
 }

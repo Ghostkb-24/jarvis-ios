@@ -32,12 +32,26 @@ final class ConversationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["请求草稿会保留，重新连接后可再次发送"].exists)
     }
 
+    func testUnpairedFixtureGuidesUserToPairFirst() {
+        launch(fixture: "unpaired")
+
+        XCTAssertTrue(app.staticTexts["connection.status"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.staticTexts["connection.status"].label, "需要配对")
+        XCTAssertEqual(app.staticTexts["phase.status"].label, "等待完成配对")
+        XCTAssertTrue(app.staticTexts["请先在设备页完成同一 Wi-Fi 配对"].exists)
+        XCTAssertTrue(app.buttons["查看配对说明"].exists)
+    }
+
     func testConfirmationShowsRecipientAndFullMessageBeforeAllowing() {
         launch(fixture: "confirmation")
 
         XCTAssertTrue(
             app.descendants(matching: .any)["confirmation.preview"].waitForExistence(timeout: 2)
         )
+        XCTAssertTrue(app.staticTexts["发送微信消息"].exists)
+        XCTAssertTrue(app.staticTexts["发送前请你确认"].exists)
+        XCTAssertTrue(app.staticTexts["目标应用"].exists)
+        XCTAssertTrue(app.staticTexts["微信"].exists)
         XCTAssertTrue(app.staticTexts["收件人：宋小宝"].exists)
         XCTAssertTrue(app.staticTexts["明天上午十点在工作室见，记得带上最终版方案。"].exists)
         XCTAssertTrue(app.buttons["允许并发送"].exists)
@@ -57,15 +71,35 @@ final class ConversationUITests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 2), .completed)
         XCTAssertTrue(app.staticTexts["已取消，未执行"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["测试客户端调用次数：0"].exists)
+        XCTAssertTrue(app.staticTexts["测试客户端调用次数：1"].exists)
     }
 
-    func testResultUnknownWarnsAgainstDuplicateSend() {
-        launch(fixture: "result-unknown")
+    func testFailureFixtureShowsBridgeRejectionState() {
+        launch(fixture: "failed")
 
         XCTAssertTrue(app.staticTexts["phase.status"].waitForExistence(timeout: 2))
-        XCTAssertEqual(app.staticTexts["phase.status"].label, "结果待确认")
-        XCTAssertTrue(app.staticTexts["不要重复发送，请检查目标应用"].exists)
+        XCTAssertEqual(app.staticTexts["phase.status"].label, "操作失败")
+        XCTAssertTrue(app.staticTexts["Bridge 拒绝了这次请求"].exists)
+    }
+
+    func testSucceededFixtureShowsCompletionState() {
+        launch(fixture: "succeeded")
+
+        XCTAssertTrue(app.staticTexts["phase.status"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.staticTexts["phase.status"].label, "已完成")
+        XCTAssertTrue(app.staticTexts["测试请求已安全完成"].exists)
+    }
+
+    func testBlockedRefusalHidesApprovalControl() {
+        launch(fixture: "blocked-payment")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["confirmation.preview"].waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(app.staticTexts["无法执行该操作"].exists)
+        XCTAssertTrue(app.staticTexts["涉及付款，Jarvis 不会代你确认或付款。"].exists)
+        XCTAssertFalse(app.buttons["允许并发送"].exists)
+        XCTAssertTrue(app.buttons["知道了"].exists)
     }
 
     private func launch(fixture: String) {

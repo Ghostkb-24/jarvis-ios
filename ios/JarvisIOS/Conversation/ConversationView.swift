@@ -46,10 +46,10 @@ struct ConversationView: View {
             Spacer()
 
             HStack(spacing: 7) {
-                Image(systemName: model.isConnected ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .foregroundStyle(model.isConnected ? JarvisTheme.connected : JarvisTheme.error)
+                Image(systemName: connectionSymbol)
+                    .foregroundStyle(connectionColor)
                     .accessibilityHidden(true)
-                Text(model.isConnected ? "电脑已连接" : "电脑离线")
+                Text(model.device.connectionStatus)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(JarvisTheme.primaryText)
                     .accessibilityIdentifier("connection.status")
@@ -71,12 +71,12 @@ struct ConversationView: View {
                         : 1
                 )
 
-            Text(model.phase.title)
+            Text(model.statusTitle)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(JarvisTheme.primaryText)
                 .accessibilityIdentifier("phase.status")
 
-            Text(model.phase.detail)
+            Text(model.statusDetail)
                 .font(.subheadline)
                 .foregroundStyle(JarvisTheme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -92,6 +92,16 @@ struct ConversationView: View {
             if model.speechPermissionStatus.needsSettings {
                 SpeechPermissionView(status: model.speechPermissionStatus)
                     .padding(.top, 8)
+            }
+
+            if !model.device.isPaired {
+                Button("查看配对说明") {
+                    model.selectedTab = .devices
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(JarvisTheme.accent)
+                .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity)
@@ -122,8 +132,15 @@ struct ConversationView: View {
 
             statusRow(
                 symbol: "desktopcomputer",
-                label: model.isConnected ? "Windows 主机可用" : "Windows 主机离线",
-                color: model.isConnected ? JarvisTheme.connected : JarvisTheme.error
+                label: model.device.connectionStatus == "已连接"
+                    ? "Windows 主机可用"
+                    : model.device.connectionStatus,
+                color: connectionColor
+            )
+            statusRow(
+                symbol: "link.badge.plus",
+                label: model.device.pairingStatus,
+                color: model.device.isPaired ? JarvisTheme.connected : JarvisTheme.warning
             )
             statusRow(
                 symbol: "cpu",
@@ -165,7 +182,36 @@ struct ConversationView: View {
             .accessibilityLabel("发送消息")
         }
         .accessibilityIdentifier("composer")
-        .disabled(model.phase.blocksCompetingInput || model.isRequestingSpeechPermission)
+        .disabled(
+            model.phase.blocksCompetingInput
+                || model.isRequestingSpeechPermission
+                || !model.device.isPaired
+                || model.device.connectionStatus == "正在连接"
+        )
+    }
+
+    private var connectionSymbol: String {
+        switch model.device.connectionStatus {
+        case "已连接":
+            "checkmark.circle.fill"
+        case "需要配对":
+            "link.badge.plus"
+        case "正在连接":
+            "dot.radiowaves.left.and.right"
+        default:
+            "xmark.circle.fill"
+        }
+    }
+
+    private var connectionColor: Color {
+        switch model.device.connectionStatus {
+        case "已连接":
+            JarvisTheme.connected
+        case "需要配对", "正在连接":
+            JarvisTheme.warning
+        default:
+            JarvisTheme.error
+        }
     }
 
     private func sectionTitle(_ title: String) -> some View {

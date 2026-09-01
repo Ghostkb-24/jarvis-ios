@@ -5,6 +5,39 @@ import XCTest
 
 final class AppModelTests: XCTestCase {
     @MainActor
+    func testUnpairedConnectionStateShowsPairingRequiredAndRejectsSubmissions() async throws {
+        let client = ControllableBridgeClient(
+            initialConnectionState: .unpaired(endpoint: .discovered(try discoveryMessage()))
+        )
+        let model = makeModel(client: client)
+
+        let synced = await waitUntil { model.statusTitle == "等待完成配对" }
+        XCTAssertTrue(synced)
+        XCTAssertFalse(model.device.isPaired)
+        XCTAssertEqual(model.device.connectionStatus, "需要配对")
+        XCTAssertFalse(model.submit(text: "帮我发一条消息"))
+        XCTAssertEqual(model.notice, "请先完成同一 Wi-Fi 配对")
+    }
+
+    @MainActor
+    func testConnectedConnectionStateShowsPairedDeviceDetails() async throws {
+        let client = ControllableBridgeClient(
+            initialConnectionState: .connected(
+                endpoint: .discovered(try discoveryMessage()),
+                deviceID: "unit-test-iphone"
+            )
+        )
+        let model = makeModel(client: client, phase: .offline, device: .offline)
+
+        let synced = await waitUntil { model.phase == .idle }
+        XCTAssertTrue(synced)
+        XCTAssertTrue(model.device.isPaired)
+        XCTAssertTrue(model.device.isConnected)
+        XCTAssertEqual(model.device.computerName, "工作室 Windows")
+        XCTAssertEqual(model.device.connectionStatus, "已连接")
+    }
+
+    @MainActor
     func testSubmitTextUsesBridgeChatRequestAndAppliesItsResponse() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
@@ -205,6 +238,10 @@ final class AppModelTests: XCTestCase {
         let didReachPreview = await waitUntil { model.pendingAction != nil }
         XCTAssertTrue(didReachPreview)
         let preview = try XCTUnwrap(model.pendingAction)
+        XCTAssertEqual(preview.title, "发送微信消息")
+        XCTAssertEqual(preview.summary, "发送前请你确认")
+        XCTAssertEqual(preview.action, "发送消息")
+        XCTAssertEqual(preview.target, "微信")
         XCTAssertEqual(preview.recipient, "宋小宝")
         XCTAssertEqual(preview.message, "明天上午十点见。")
 
@@ -234,7 +271,7 @@ final class AppModelTests: XCTestCase {
     }
 
     @MainActor
-    func testCancellingToolPreviewDoesNotCallBridgeConfirmation() async throws {
+    func testCancellingToolPreviewSendsDeclineThroughBridge() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)
 
@@ -262,21 +299,86 @@ final class AppModelTests: XCTestCase {
         let preview = try XCTUnwrap(model.pendingAction)
 
         model.cancelPreview(preview)
-        await settleAsyncWork()
+        let didCancel = await waitForCancellationCount(1, client: client)
+        XCTAssertTrue(didCancel)
+        let cancellations = await client.cancellations()
+        let cancellation = try XCTUnwrap(cancellations.first)
+        XCTAssertEqual(cancellation.targetRequestID, request.requestID)
+        XCTAssertEqual(cancellation.request.kind, .cancel)
 
+        await client.completeCancellation(
+            requestID: cancellation.request.requestID,
+            with: try response(
+                requestID: request.requestID,
+                state: .cancelled,
+                risk: .confirmationRequired,
+                payload: ["summary": .string("已取消")]
+            )
+        )
+        let settled = await waitUntil { model.phase == .idle }
+        XCTAssertTrue(settled)
         XCTAssertEqual(model.phase, .idle)
         XCTAssertEqual(model.notice, "已取消，未执行")
-        let confirmationCount = await client.confirmations().count
-        XCTAssertEqual(confirmationCount, 0)
     }
 
     @MainActor
-    private func makeModel(client: ControllableBridgeClient) -> AppModel {
+    func testBlockedRiskRejectionPresentsRefusalPreviewWithoutApproval() async throws {
+        let client = ControllableBridgeClient()
+        let model = makeModel(client: client)
+
+        XCTAssertTrue(
+            model.submit(
+                proposal: .sendWeChatMessage(
+                    recipient: "宋小宝",
+                    message: "替我支付这笔款项。"
+                )
+            )
+        )
+        let didSubmit = await waitForSubmitCount(1, client: client)
+        XCTAssertTrue(didSubmit)
+        let submitted = await client.submittedRequests()
+        let request = try XCTUnwrap(submitted.first)
+
+        await client.failSubmit(
+            requestID: request.requestID,
+            with: BridgeError.requestRejected(
+                try rejection(
+                    requestID: request.requestID,
+                    reason: .paymentBlocked,
+                    message: "涉及付款，已拒绝执行。"
+                )
+            )
+        )
+
+        let didReachPreview = await waitUntil { model.pendingAction != nil }
+        XCTAssertTrue(didReachPreview)
+        let preview = try XCTUnwrap(model.pendingAction)
+        XCTAssertFalse(preview.allowsApproval)
+        XCTAssertEqual(preview.refusalReason, .paymentBlocked)
+        XCTAssertEqual(model.statusTitle, "无法执行该操作")
+
+        model.allow(preview)
+        await settleAsyncWork()
+        let confirmationCount = await client.confirmations().count
+        XCTAssertEqual(confirmationCount, 0)
+
+        model.cancelPreview(preview)
+        let settled = await waitUntil { model.phase == .failed }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(model.notice, "涉及付款，已拒绝执行。")
+    }
+
+    @MainActor
+    private func makeModel(
+        client: ControllableBridgeClient,
+        phase: AppModel.Phase = .idle,
+        device: DeviceSnapshot = connectedDevice
+    ) -> AppModel {
         AppModel(
             client: client,
             deviceID: "unit-test-iphone",
-            phase: .idle,
-            device: connectedDevice
+            phase: phase,
+            device: device
         )
     }
 
@@ -315,11 +417,42 @@ final class AppModelTests: XCTestCase {
             state: .awaitingConfirmation,
             risk: .confirmationRequired,
             payload: [
+                "task_id": .string("task-preview-1"),
+                "title": .string("发送微信消息"),
+                "summary": .string("发送前请你确认"),
+                "action": .string("发送消息"),
+                "target": .string("微信"),
                 "arguments": .object([
                     "contact": .string("宋小宝"),
                     "message": .string(message),
                 ]),
             ]
+        )
+    }
+
+    private func rejection(
+        requestID: String,
+        reason: RejectionReason,
+        message: String
+    ) throws -> TaskRejection {
+        try TaskRejection(
+            version: 1,
+            requestID: requestID,
+            taskID: "task-preview-1",
+            reason: reason,
+            message: message,
+            retryable: false
+        )
+    }
+
+    private func discoveryMessage() throws -> DiscoveryMessage {
+        try DiscoveryMessage(
+            version: 1,
+            bridgeID: "bridge-1",
+            bridgeURL: "https://jarvis.local",
+            certificateFingerprint: String(repeating: "a", count: 64),
+            displayName: "工作室 Windows",
+            requiresPairing: true
         )
     }
 
@@ -348,6 +481,18 @@ final class AppModelTests: XCTestCase {
     }
 
     @MainActor
+    private func waitForCancellationCount(
+        _ expected: Int,
+        client: ControllableBridgeClient
+    ) async -> Bool {
+        for _ in 0 ..< 1_000 {
+            if await client.cancellations().count >= expected { return true }
+            await Task.yield()
+        }
+        return false
+    }
+
+    @MainActor
     private func waitUntil(_ condition: @MainActor () -> Bool) async -> Bool {
         for _ in 0 ..< 1_000 {
             if condition() { return true }
@@ -370,14 +515,40 @@ private actor ControllableBridgeClient: JarvisBridgeClient {
         let request: BridgeRequest
     }
 
+    struct CancellationCall: Sendable {
+        let targetRequestID: String
+        let request: BridgeRequest
+    }
+
     private var submits: [BridgeRequest] = []
     private var confirmationCalls: [ConfirmationCall] = []
+    private var cancellationCalls: [CancellationCall] = []
+    private let initialConnectionState: BridgeConnectionState
     private var submitContinuations: [
         String: CheckedContinuation<BridgeResponse, any Error>
     ] = [:]
     private var confirmationContinuations: [
         String: CheckedContinuation<BridgeResponse, any Error>
     ] = [:]
+    private var cancellationContinuations: [
+        String: CheckedContinuation<BridgeResponse, any Error>
+    ] = [:]
+
+    init(
+        initialConnectionState: BridgeConnectionState = .connected(
+            endpoint: .manual(
+                baseURL: URL(string: "https://127.0.0.1")!,
+                certificateFingerprint: String(repeating: "a", count: 64)
+            ),
+            deviceID: "unit-test-iphone"
+        )
+    ) {
+        self.initialConnectionState = initialConnectionState
+    }
+
+    func connectionState() async -> BridgeConnectionState {
+        initialConnectionState
+    }
 
     func submit(_ request: BridgeRequest) async throws -> BridgeResponse {
         submits.append(request)
@@ -406,6 +577,22 @@ private actor ControllableBridgeClient: JarvisBridgeClient {
         confirmationCalls
     }
 
+    func cancel(
+        _ requestID: String,
+        cancellation: BridgeRequest
+    ) async throws -> BridgeResponse {
+        cancellationCalls.append(
+            CancellationCall(targetRequestID: requestID, request: cancellation)
+        )
+        return try await withCheckedThrowingContinuation { continuation in
+            cancellationContinuations[cancellation.requestID] = continuation
+        }
+    }
+
+    func cancellations() -> [CancellationCall] {
+        cancellationCalls
+    }
+
     func completeSubmit(requestID: String, with response: BridgeResponse) {
         submitContinuations.removeValue(forKey: requestID)?.resume(returning: response)
     }
@@ -416,5 +603,9 @@ private actor ControllableBridgeClient: JarvisBridgeClient {
 
     func completeConfirmation(requestID: String, with response: BridgeResponse) {
         confirmationContinuations.removeValue(forKey: requestID)?.resume(returning: response)
+    }
+
+    func completeCancellation(requestID: String, with response: BridgeResponse) {
+        cancellationContinuations.removeValue(forKey: requestID)?.resume(returning: response)
     }
 }

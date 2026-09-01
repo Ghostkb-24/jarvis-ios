@@ -38,7 +38,7 @@ struct DeviceView: View {
                     Text(device.computerName)
                         .font(.headline)
                         .foregroundStyle(JarvisTheme.primaryText)
-                    Text(device.isConnected ? "已连接" : "未连接")
+                    Text(device.connectionStatus)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(device.isConnected ? JarvisTheme.connected : JarvisTheme.error)
                         .accessibilityIdentifier("device.connection.status")
@@ -52,6 +52,12 @@ struct DeviceView: View {
                 title: "连接校验",
                 value: device.isCertificatePinned ? "证书固定已验证" : "尚未验证",
                 color: device.isCertificatePinned ? JarvisTheme.connected : JarvisTheme.warning
+            )
+            detailRow(
+                symbol: "link.badge.plus",
+                title: "配对状态",
+                value: device.pairingStatus,
+                color: device.isPaired ? JarvisTheme.connected : JarvisTheme.warning
             )
             detailRow(
                 symbol: "cpu",
