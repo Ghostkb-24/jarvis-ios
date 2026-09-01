@@ -389,7 +389,9 @@ public struct BridgeClient: Sendable {
         return try await claimCredentials(
             request: request,
             transport: transport,
-            store: store
+            store: store,
+            expectedDeviceID: payload.deviceID,
+            expectedDevicePublicKey: payload.devicePublicKey
         )
     }
 
@@ -430,7 +432,9 @@ public struct BridgeClient: Sendable {
         return try await claimCredentials(
             request: request,
             transport: transport,
-            store: store
+            store: store,
+            expectedDeviceID: response.deviceID,
+            expectedDevicePublicKey: response.devicePublicKey
         )
     }
 
@@ -457,8 +461,14 @@ public struct BridgeClient: Sendable {
     ) async throws -> BridgeResponse {
         try requireOwner(authorization)
         try requireTarget(requestID, request: authorization)
+        let confirmation = try taskConfirmation(for: requestID, authorization: authorization)
         let url = endpoint(["v1", "tasks", requestID, "confirm"])
-        let urlRequest = try signedURLRequest(url: url, method: "POST", request: authorization)
+        let urlRequest = try signedConfirmationRequest(
+            url: url,
+            method: "POST",
+            request: authorization,
+            confirmation: confirmation
+        )
         return try await sendStateChanging(urlRequest)
     }
 
@@ -469,6 +479,25 @@ public struct BridgeClient: Sendable {
     ) throws -> URLRequest {
         let signature = try RequestSigner.signature(for: request, secret: credentials.secret)
         let envelope = try SignedRequestEnvelope(request: request, signature: signature)
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = method
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try JSONEncoder().encode(envelope)
+        return urlRequest
+    }
+
+    private func signedConfirmationRequest(
+        url: URL,
+        method: String,
+        request: BridgeRequest,
+        confirmation: TaskConfirmation
+    ) throws -> URLRequest {
+        let signature = try RequestSigner.signature(for: request, secret: credentials.secret)
+        let envelope = try SignedTaskConfirmationEnvelope(
+            request: request,
+            confirmation: confirmation,
+            signature: signature
+        )
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -490,7 +519,7 @@ public struct BridgeClient: Sendable {
             }
             if let bridgeError = error as? BridgeError {
                 switch bridgeError {
-                case .requestRejected, .httpStatus:
+                case .requestRejected(_), .httpStatus(_):
                     await stateStore.update(
                         .connected(endpoint: endpointSelection, deviceID: credentials.deviceID)
                     )
@@ -525,10 +554,14 @@ public struct BridgeClient: Sendable {
                     throw BridgeError.transportUnavailable
                 }
                 if let bridgeError = error as? BridgeError {
-                    if case .requestRejected = bridgeError {
-                        await stateStore.update(
-                            .connected(endpoint: endpointSelection, deviceID: credentials.deviceID)
-                        )
+                    switch bridgeError {
+                    case .requestRejected(_),
+                         .httpStatus(_),
+                         .invalidProtocolResponse,
+                         .invalidHTTPResponse:
+                        await markPaired()
+                    default:
+                        await markDisconnected(canRetryReads: true)
                     }
                     throw bridgeError
                 }
@@ -630,6 +663,37 @@ public struct BridgeClient: Sendable {
         Self.endpoint(baseURL: baseURL, components: components)
     }
 
+    private func taskConfirmation(
+        for taskID: String,
+        authorization: BridgeRequest,
+        now: Date = Date()
+    ) throws -> TaskConfirmation {
+        let decision: ConfirmationDecision
+        switch authorization.kind {
+        case .confirm:
+            decision = .approve
+        case .cancel:
+            decision = .decline
+        case .chat, .tool:
+            throw BridgeError.invalidOperationRequest
+        }
+        let confirmation = try TaskConfirmation(
+            version: 1,
+            requestID: authorization.requestID,
+            taskID: taskID,
+            decision: decision,
+            decidedAt: Self.timestamp(now)
+        )
+        try confirmation.validateFreshness(now: now)
+        return confirmation
+    }
+
+    private func markPaired() async {
+        await stateStore.update(
+            .paired(endpoint: endpointSelection, deviceID: credentials.deviceID)
+        )
+    }
+
     private func markDisconnected(canRetryReads: Bool) async {
         await stateStore.update(
             .disconnected(
@@ -653,10 +717,18 @@ public struct BridgeClient: Sendable {
         }
     }
 
+    private static func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
     private static func claimCredentials(
         request: URLRequest,
         transport: any BridgeTransport,
-        store: KeychainDeviceStore
+        store: KeychainDeviceStore,
+        expectedDeviceID: String,
+        expectedDevicePublicKey: String
     ) async throws -> DeviceCredentials {
         let data: Data
         let response: HTTPURLResponse
@@ -674,12 +746,20 @@ public struct BridgeClient: Sendable {
         guard (200 ... 299).contains(response.statusCode) else {
             throw BridgeError.httpStatus(response.statusCode)
         }
-        let credentials = try decodePairClaimResponse(data)
+        let credentials = try decodePairClaimResponse(
+            data,
+            expectedDeviceID: expectedDeviceID,
+            expectedDevicePublicKey: expectedDevicePublicKey
+        )
         try store.save(credentials)
         return credentials
     }
 
-    private static func decodePairClaimResponse(_ data: Data) throws -> DeviceCredentials {
+    private static func decodePairClaimResponse(
+        _ data: Data,
+        expectedDeviceID: String,
+        expectedDevicePublicKey: String
+    ) throws -> DeviceCredentials {
         let decoded: PairClaimResponse
         do {
             decoded = try JSONDecoder().decode(PairClaimResponse.self, from: data)
@@ -689,6 +769,8 @@ public struct BridgeClient: Sendable {
         guard
             decoded.version == 1,
             !decoded.deviceID.isEmpty,
+            decoded.deviceID == expectedDeviceID,
+            decoded.devicePublicKey == expectedDevicePublicKey,
             let secret = decodeURLSafeBase64(decoded.deviceSecret),
             secret.count == 32
         else {
@@ -758,9 +840,27 @@ private struct PairClaimRequest: Encodable {
     }
 }
 
+private struct SignedTaskConfirmationEnvelope: Encodable {
+    let request: BridgeRequest
+    let confirmation: TaskConfirmation
+    let signature: String
+
+    init(
+        request: BridgeRequest,
+        confirmation: TaskConfirmation,
+        signature: String
+    ) throws {
+        try RequestSigner.validate(signature: signature)
+        self.request = request
+        self.confirmation = confirmation
+        self.signature = signature
+    }
+}
+
 private struct PairClaimResponse: Decodable {
     let version: Int
     let deviceID: String
+    let devicePublicKey: String
     let deviceSecret: String
 
     init(from decoder: Decoder) throws {
@@ -778,14 +878,21 @@ private struct PairClaimResponse: Decodable {
         let container = try decoder.container(keyedBy: PairClaimResponseCodingKey.self)
         version = try container.decode(Int.self, forKey: .version)
         deviceID = try container.decode(String.self, forKey: .deviceID)
+        devicePublicKey = try container.decode(String.self, forKey: .devicePublicKey)
         deviceSecret = try container.decode(String.self, forKey: .deviceSecret)
     }
 
-    private static let allowedFields: Set<String> = ["version", "device_id", "device_secret"]
+    private static let allowedFields: Set<String> = [
+        "version",
+        "device_id",
+        "device_public_key",
+        "device_secret",
+    ]
 
     private enum PairClaimResponseCodingKey: String, CodingKey {
         case version
         case deviceID = "device_id"
+        case devicePublicKey = "device_public_key"
         case deviceSecret = "device_secret"
     }
 }

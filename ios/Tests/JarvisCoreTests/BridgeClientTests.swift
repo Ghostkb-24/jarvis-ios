@@ -194,7 +194,7 @@ final class BridgeClientTests: XCTestCase {
     func testPairingChallengeExchangePersistsOnlyIdentityAndSecretAfterValidFreshResponse() async throws {
         let security = FakeSecurityItemAccess()
         let store = KeychainDeviceStore(service: "test.jarvis", security: security)
-        let body = Data(#"{"version":1,"device_id":"paired-iphone","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}"#.utf8)
+        let body = Data(#"{"version":1,"device_id":"iphone-1","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}"#.utf8)
         let transport = RecordingTransport(results: [
             .success((body, try httpResponse(status: 201))),
         ])
@@ -240,6 +240,56 @@ final class BridgeClientTests: XCTestCase {
         XCTAssertNil(try store.load())
         XCTAssertTrue(security.addedItems.isEmpty)
         XCTAssertEqual(await transport.requestCount(), 0)
+    }
+
+    func testPairingRejectsReturnedCredentialDeviceMismatchBeforePersisting() async throws {
+        let security = FakeSecurityItemAccess()
+        let store = KeychainDeviceStore(service: "test.jarvis", security: security)
+        let body = Data(#"{"version":1,"device_id":"other-device","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}"#.utf8)
+        let transport = RecordingTransport(results: [
+            .success((body, try httpResponse(status: 201))),
+        ])
+
+        do {
+            _ = try await BridgeClient.completePairing(
+                challenge: try makePairingChallenge(),
+                response: try makePairingChallengeResponse(),
+                endpoint: .discovered(try makeDiscoveryMessage()),
+                store: store,
+                now: try freshNow(),
+                transportFactory: RecordingPinnedTransportFactory(transport: transport)
+            )
+            XCTFail("Mismatched returned device IDs must be rejected")
+        } catch {
+            XCTAssertEqual(error as? BridgeError, .invalidPairingResponse)
+        }
+        XCTAssertNil(try store.load())
+        XCTAssertTrue(security.addedItems.isEmpty)
+    }
+
+    func testPairingRejectsReturnedCredentialPublicKeyMismatchBeforePersisting() async throws {
+        let security = FakeSecurityItemAccess()
+        let store = KeychainDeviceStore(service: "test.jarvis", security: security)
+        let body = Data(#"{"version":1,"device_id":"iphone-1","device_public_key":"abababababababababababababababababababababababababababababababab","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}"#.utf8)
+        let transport = RecordingTransport(results: [
+            .success((body, try httpResponse(status: 201))),
+        ])
+
+        do {
+            _ = try await BridgeClient.completePairing(
+                challenge: try makePairingChallenge(),
+                response: try makePairingChallengeResponse(),
+                endpoint: .discovered(try makeDiscoveryMessage()),
+                store: store,
+                now: try freshNow(),
+                transportFactory: RecordingPinnedTransportFactory(transport: transport)
+            )
+            XCTFail("Mismatched returned public key bindings must be rejected")
+        } catch {
+            XCTAssertEqual(error as? BridgeError, .invalidPairingResponse)
+        }
+        XCTAssertNil(try store.load())
+        XCTAssertTrue(security.addedItems.isEmpty)
     }
 
     func testSubmitDecodesInvalidSignatureRejection() async throws {
@@ -346,7 +396,57 @@ final class BridgeClientTests: XCTestCase {
         )
     }
 
-    func testConfirmationAndCancellationBindOwnerTargetAndServerPath() async throws {
+    func testReadOnlyHTTPFailureReturnsToPairedState() async throws {
+        let endpoint = try manualEndpoint()
+        let client = try BridgeClient(
+            endpoint: endpoint,
+            credentials: makeCredentials(),
+            transport: RecordingTransport(results: [
+                .success((Data("{}".utf8), try httpResponse(status: 503))),
+            ])
+        )
+        let authentication = try makeRequest(
+            requestID: "status-503",
+            idempotencyKey: "status-idem-503",
+            kind: .chat,
+            payload: ["target_request_id": .string("req-503")]
+        )
+
+        do {
+            _ = try await client.status(for: "req-503", authentication: authentication)
+            XCTFail("HTTP read failures must be surfaced")
+        } catch {
+            XCTAssertEqual(error as? BridgeError, .httpStatus(503))
+        }
+        XCTAssertEqual(await client.connectionState(), .paired(endpoint: endpoint, deviceID: "iphone-1"))
+    }
+
+    func testReadOnlyProtocolFailureReturnsToPairedState() async throws {
+        let endpoint = try manualEndpoint()
+        let client = try BridgeClient(
+            endpoint: endpoint,
+            credentials: makeCredentials(),
+            transport: RecordingTransport(results: [
+                .success((Data(#"{"version":1}"#.utf8), try httpResponse(status: 200))),
+            ])
+        )
+        let authentication = try makeRequest(
+            requestID: "status-invalid",
+            idempotencyKey: "status-idem-invalid",
+            kind: .chat,
+            payload: ["target_request_id": .string("req-invalid")]
+        )
+
+        do {
+            _ = try await client.status(for: "req-invalid", authentication: authentication)
+            XCTFail("Protocol read failures must be surfaced")
+        } catch {
+            XCTAssertEqual(error as? BridgeError, .invalidProtocolResponse)
+        }
+        XCTAssertEqual(await client.connectionState(), .paired(endpoint: endpoint, deviceID: "iphone-1"))
+    }
+
+    func testConfirmationAndCancellationSerializeTaskConfirmationPayload() async throws {
         let transport = RecordingTransport(results: [
             .success(try terminalResponse(for: "req-1", state: .completed)),
             .success(try terminalResponse(for: "req-1", state: .cancelled)),
@@ -380,6 +480,20 @@ final class BridgeClientTests: XCTestCase {
             $0.url?.absoluteString == "https://192.168.1.20:8443/v1/tasks/req-1/confirm"
                 && $0.httpMethod == "POST"
         })
+        let confirmationEnvelope = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try XCTUnwrap(sent[0].httpBody)) as? [String: Any]
+        )
+        let cancellationEnvelope = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try XCTUnwrap(sent[1].httpBody)) as? [String: Any]
+        )
+        let approved = try XCTUnwrap(confirmationEnvelope["confirmation"] as? [String: Any])
+        let declined = try XCTUnwrap(cancellationEnvelope["confirmation"] as? [String: Any])
+        XCTAssertEqual(approved["decision"] as? String, "approve")
+        XCTAssertEqual(declined["decision"] as? String, "decline")
+        XCTAssertEqual(approved["task_id"] as? String, "req-1")
+        XCTAssertEqual(declined["task_id"] as? String, "req-1")
+        XCTAssertNotNil(approved["decided_at"] as? String)
+        XCTAssertNotNil(declined["decided_at"] as? String)
     }
 }
 

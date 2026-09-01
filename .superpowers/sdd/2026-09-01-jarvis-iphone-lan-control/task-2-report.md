@@ -44,3 +44,37 @@ No whitespace errors reported. Git printed existing LF/CRLF conversion warnings 
 
 - Swift/Xcode tooling is unavailable in this Windows environment, so the new iOS tests were written and reviewed but not compiled or executed locally.
 - The current implementation preserves existing request/confirm/cancel entry points while extending the client with endpoint/state/pairing helpers for later UI integration.
+
+## Round 1 Fixes
+
+### Review items addressed
+
+- Confirm/cancel transport now serializes a `TaskConfirmation` payload with explicit `decision` and fresh `decided_at`, wrapped alongside the signed authorization request.
+- Pair-claim persistence now requires the returned credential payload to echo the expected `device_id` and `device_public_key`; mismatches are rejected before any Keychain write.
+- Read-only HTTP/protocol failures now transition out of `.connecting` into `.paired` instead of leaving the transport state ambiguous.
+
+### Additional tests added or updated
+
+- Confirmation/cancellation payload serialization now checks that the `confirmation` object includes `decision`, `task_id`, and `decided_at`.
+- Pairing tests now cover returned `device_id` mismatch and returned `device_public_key` mismatch before persistence.
+- Read-only status tests now cover HTTP failure and protocol-decoding failure state fallback to `.paired`.
+
+### Additional verification on 2026-09-01
+
+1. `swift test --package-path ios --filter JarvisCoreTests/BridgeClientTests`
+2. `git diff --check`
+
+### Additional output
+
+`swift test --package-path ios --filter JarvisCoreTests/BridgeClientTests`
+
+```text
+swift:
+The term 'swift' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+`git diff --check`
+
+```text
+No whitespace errors reported. Git printed existing LF/CRLF conversion warnings for the worktree.
+```
