@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -142,6 +142,7 @@ class LanBridgeAdapter:
         self._now = now or (lambda: datetime.now(UTC))
         self._broker = _EventBroker()
         self._pairing_challenges: dict[str, _PairingChallenge] = {}
+        self._device_public_keys: dict[str, str] = {}
 
     def current_pairing_challenge(
         self,
@@ -170,6 +171,9 @@ class LanBridgeAdapter:
     def subscriber_count(self, request_id: str) -> int:
         return self._broker.subscriber_count(request_id)
 
+    def device_public_key_for(self, device_id: str) -> str | None:
+        return self._device_public_keys.get(device_id)
+
     def claim_pairing_challenge(self, payload: PairingChallengeResponse) -> dict[str, Any]:
         challenge = self._pairing_challenges.get(payload.session_id)
         if challenge is None:
@@ -180,6 +184,8 @@ class LanBridgeAdapter:
         if (
             payload.pairing_code != challenge.pairing_code
             or payload.challenge_nonce != challenge.challenge_nonce
+            or payload.device_id != challenge.device_id
+            or payload.device_public_key != challenge.device_public_key
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -195,10 +201,11 @@ class LanBridgeAdapter:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         finally:
             self._pairing_challenges.pop(payload.session_id, None)
+        self._device_public_keys[device.device_id] = challenge.device_public_key
         return {
             "version": 1,
-            "device_id": payload.device_id,
-            "device_public_key": payload.device_public_key,
+            "device_id": device.device_id,
+            "device_public_key": self._device_public_keys[device.device_id],
             "device_secret": base64.urlsafe_b64encode(device.secret).decode("ascii"),
         }
 
@@ -238,7 +245,11 @@ class LanBridgeAdapter:
         request = envelope.request
         rejection = self._blocked_rejection_for_confirmation(request_id)
         if rejection is not None:
-            self.service.authenticate(request, envelope.signature, envelope.confirmation)
+            try:
+                self.service.authenticate(request, envelope.signature, envelope.confirmation)
+                self._authorize_task_owner(request_id, request.device_id)
+            except Exception as error:
+                self._raise_http_error(error)
             await self._broker.publish(request_id, rejection)
             return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content=rejection)
         try:
@@ -358,6 +369,12 @@ class LanBridgeAdapter:
         )
         return self._blocked_rejection(request)
 
+    def _authorize_task_owner(self, request_id: str, device_id: str) -> None:
+        record = self.service._ledger.get(request_id)  # noqa: SLF001
+        if record is None:
+            raise KeyError(request_id)
+        self.service._require_owner(record, device_id)  # noqa: SLF001
+
     def _blocked_reason(self, request: BridgeRequest) -> str | None:
         body = str(request.payload).casefold()
         if any(token in body for token in ("password", "密码", "支付密码", "passcode", "pin")):
@@ -429,6 +446,7 @@ class LanBridgeAdapter:
 
 def create_lan_bridge_app(adapter: LanBridgeAdapter) -> FastAPI:
     app = FastAPI(title="Jarvis LAN Bridge", version="1")
+    app.state.adapter = adapter
 
     @app.post("/v1/pair/challenge", status_code=status.HTTP_201_CREATED)
     async def claim_pairing_challenge(response: PairingChallengeResponse) -> dict[str, Any]:
@@ -471,6 +489,7 @@ def compose_lan_bridge(
     base_dir: Path,
     credentials: CredentialStore,
     host: str,
+    chat_dispatcher: Callable[[str], Awaitable[str]] | None = None,
     now: callable | None = None,
     controller_factory: type[BridgeServerController] | None = None,
 ) -> LanBridgeComposition:
@@ -497,6 +516,7 @@ def compose_lan_bridge(
         ledger=IdempotencyLedger(store),
         registry=registry,
         pairing_session_owner=pairing_owner,
+        chat_dispatcher=chat_dispatcher,
         now=now,
     )
     adapter = LanBridgeAdapter(

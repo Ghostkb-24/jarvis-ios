@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,7 +50,7 @@ class MemoryVolume:
 
 def make_adapter(
     tmp_path: Path,
-) -> tuple[LanBridgeAdapter, MemoryVolume, list[tuple[str, str]]]:
+) -> tuple[LanBridgeAdapter, MemoryVolume, list[tuple[str, str]], DeviceStore]:
     store = SQLiteStore.open(tmp_path / "state.db")
     backend = MemoryCredentialBackend()
     devices = DeviceStore(store, backend)
@@ -86,6 +87,7 @@ def make_adapter(
         LanBridgeAdapter(service=service, pairing_session_owner=pairing_owner),
         volume,
         sent_messages,
+        devices,
     )
 
 
@@ -159,12 +161,14 @@ def approval(request_id: str, confirmation_request: BridgeRequest) -> TaskConfir
     )
 
 
-def test_pairing_challenge_claims_device_and_echoes_key_binding(tmp_path: Path) -> None:
-    adapter, _, _ = make_adapter(tmp_path)
+def test_pairing_challenge_returns_persisted_identity_and_subsequent_auth_uses_it(
+    tmp_path: Path,
+) -> None:
+    adapter, volume, _, devices = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     challenge = adapter.current_pairing_challenge(
         device_name="Alice's iPhone",
-        device_id="iphone-2",
+        device_id="client-supplied-id",
         device_public_key="cd" * 32,
     )
 
@@ -172,13 +176,36 @@ def test_pairing_challenge_claims_device_and_echoes_key_binding(tmp_path: Path) 
         response = client.post("/v1/pair/challenge", json=challenge.model_dump(mode="json"))
 
     assert response.status_code == status.HTTP_201_CREATED
-    assert response.json()["device_id"] == "iphone-2"
+    persisted_device_id = response.json()["device_id"]
+    assert persisted_device_id != "client-supplied-id"
+    assert devices.get_device(persisted_device_id) is not None
     assert response.json()["device_public_key"] == "cd" * 32
-    assert response.json()["device_secret"]
+    assert adapter.device_public_key_for(persisted_device_id) == "cd" * 32
+
+    paired_secret = base64.b64decode(
+        response.json()["device_secret"],
+        altchars=b"-_",
+        validate=True,
+    )
+    request = BridgeRequest(
+        version=1,
+        request_id="paired-req-1",
+        device_id=persisted_device_id,
+        issued_at="2026-09-02T12:00:00Z",
+        idempotency_key="paired-idem-1",
+        kind="tool",
+        payload={"tool": "set_volume", "arguments": {"percent": 55}},
+    )
+
+    with TestClient(app) as client:
+        submit = client.post("/v1/requests", json=request_json(request, paired_secret))
+
+    assert submit.status_code == status.HTTP_200_OK
+    assert volume.set_values == [55]
 
 
 def test_requests_reject_invalid_signature(tmp_path: Path) -> None:
-    adapter, _, _ = make_adapter(tmp_path)
+    adapter, _, _, _ = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     request = tool_request()
     invalid = request_json(request)
@@ -191,7 +218,7 @@ def test_requests_reject_invalid_signature(tmp_path: Path) -> None:
 
 
 def test_duplicate_low_risk_submission_returns_same_terminal_event(tmp_path: Path) -> None:
-    adapter, volume, _ = make_adapter(tmp_path)
+    adapter, volume, _, _ = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     request = tool_request()
 
@@ -206,7 +233,7 @@ def test_duplicate_low_risk_submission_returns_same_terminal_event(tmp_path: Pat
 
 
 def test_confirmation_and_websocket_stream_deliver_preview_then_terminal(tmp_path: Path) -> None:
-    adapter, _, sent_messages = make_adapter(tmp_path)
+    adapter, _, sent_messages, _ = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     request = tool_request(
         tool="send_wechat_message",
@@ -236,7 +263,7 @@ def test_confirmation_and_websocket_stream_deliver_preview_then_terminal(tmp_pat
 
 
 def test_blocked_risk_refusal_returns_protocol_rejection(tmp_path: Path) -> None:
-    adapter, _, _ = make_adapter(tmp_path)
+    adapter, _, _, _ = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     request = tool_request(
         tool="send_wechat_message",
@@ -251,8 +278,58 @@ def test_blocked_risk_refusal_returns_protocol_rejection(tmp_path: Path) -> None
     assert response.json()["retryable"] is False
 
 
+def test_blocked_confirmation_never_leaks_another_devices_task(tmp_path: Path) -> None:
+    adapter, _, _, devices = make_adapter(tmp_path)
+    app = create_lan_bridge_app(adapter)
+    devices.save(
+        PairedDevice(
+            device_id="iphone-2",
+            display_name="Bob's iPhone",
+            created_at=NOW,
+            last_seen_at=NOW,
+            revoked=False,
+            secret=b"abcdef0123456789abcdef0123456789",
+        )
+    )
+    blocked_request = tool_request(
+        tool="send_wechat_message",
+        arguments={"contact": "Alice", "message": "替我输入这个支付密码"},
+    )
+    other_confirmation = BridgeRequest(
+        version=1,
+        request_id="confirm-foreign",
+        device_id="iphone-2",
+        issued_at="2026-09-02T12:00:00Z",
+        idempotency_key="confirm-foreign-idem",
+        kind="confirm",
+        payload={"target_request_id": blocked_request.request_id},
+    )
+    allowed = TaskConfirmation(
+        version=1,
+        request_id=other_confirmation.request_id,
+        task_id=blocked_request.request_id,
+        decision="approve",
+        decided_at="2026-09-02T12:00:00Z",
+    )
+
+    with TestClient(app) as client:
+        blocked = client.post("/v1/requests", json=request_json(blocked_request))
+        denied = client.post(
+            f"/v1/tasks/{blocked_request.request_id}/confirm",
+            json=confirmation_json(
+                other_confirmation,
+                allowed,
+                b"abcdef0123456789abcdef0123456789",
+            ),
+        )
+
+    assert blocked.status_code == status.HTTP_403_FORBIDDEN
+    assert denied.status_code == status.HTTP_403_FORBIDDEN
+    assert denied.json()["detail"] == "only the task owner may access or confirm it"
+
+
 def test_websocket_disconnect_cleanup_removes_subscriber(tmp_path: Path) -> None:
-    adapter, _, _ = make_adapter(tmp_path)
+    adapter, _, _, _ = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
     request = tool_request(
         tool="send_wechat_message",

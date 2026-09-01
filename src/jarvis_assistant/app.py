@@ -605,6 +605,7 @@ def _compose_mobile_bridge(
         base_dir=base_dir,
         credentials=credentials,
         host=host,
+        chat_dispatcher=lambda text: _dispatch_orchestrator_chat(orchestrator, text),
         controller_factory=controller_factory,
     )
     return MobileBridgeComposition(

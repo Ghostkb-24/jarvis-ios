@@ -1,4 +1,7 @@
+from datetime import UTC, datetime
+
 import pytest
+from fastapi.testclient import TestClient
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
@@ -654,3 +657,112 @@ def test_remote_chat_planning_never_calls_executing_orchestrator(qtbot, tmp_path
     import asyncio
     assert asyncio.run(_dispatch_orchestrator_chat(runtime.orchestrator, "你好")) == "计划回答"
     runtime.shutdown()
+
+
+def test_mobile_bridge_composition_preserves_remote_chat_dispatcher(tmp_path) -> None:
+    """Fails if LAN chat requests lose the orchestrator-backed planning path."""
+    from jarvis_assistant.bridge.auth import sign_request
+    from jarvis_assistant.bridge.protocol import BridgeRequest
+    from jarvis_assistant.storage import SQLiteStore
+    from jarvis_assistant.tools import default_registry
+
+    captured_app = None
+
+    class MemoryBackend:
+        def __init__(self) -> None:
+            self.passwords: dict[tuple[str, str], str] = {}
+
+        def get_password(self, service: str, username: str) -> str | None:
+            return self.passwords.get((service, username))
+
+        def set_password(self, service: str, username: str, value: str) -> None:
+            self.passwords[(service, username)] = value
+
+        def delete_password(self, service: str, username: str) -> None:
+            self.passwords.pop((service, username), None)
+
+    class Credentials:
+        _backend = MemoryBackend()
+
+    class MemoryVolume:
+        def get_volume(self) -> int:
+            return 20
+
+        def set_volume(self, percent: int) -> None:
+            del percent
+
+    class PlanningProvider:
+        async def respond(self, request):
+            assert request.text == "你好"
+            from jarvis_assistant.models import ParsedModelResponse
+            return ParsedModelResponse(text="计划回答", confidence=1.0)
+
+    class StubOrchestrator:
+        def __init__(self) -> None:
+            self._registry = default_registry(volume=MemoryVolume())
+            self._local_provider = PlanningProvider()
+
+    class CapturingController:
+        def __init__(self, app, *, host, ssl_context) -> None:
+            nonlocal captured_app
+            assert host == "192.168.1.20"
+            assert ssl_context is not None
+            captured_app = app
+
+        def start(self) -> None:
+            return
+
+        def request_stop(self) -> None:
+            return
+
+        def stop_and_join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    store = SQLiteStore.open(tmp_path / "state.db")
+    try:
+        _compose_mobile_bridge(
+            store=store,
+            registry=default_registry(volume=MemoryVolume()),
+            orchestrator=StubOrchestrator(),
+            base_dir=tmp_path,
+            credentials=Credentials(),
+            host="192.168.1.20",
+            controller_factory=CapturingController,
+        )
+        adapter = captured_app.state.adapter
+        from jarvis_assistant.bridge.pairing import PairedDevice
+
+        secret = b"0123456789abcdef0123456789abcdef"
+        adapter.service.device_store.save(
+            PairedDevice(
+                device_id="paired-device",
+                display_name="Alice's iPhone",
+                created_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+                last_seen_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+                revoked=False,
+                secret=secret,
+            )
+        )
+        with TestClient(captured_app) as client:
+            issued_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            request = BridgeRequest(
+                version=1,
+                request_id="chat-1",
+                device_id="paired-device",
+                issued_at=issued_at,
+                idempotency_key="chat-idem-1",
+                kind="chat",
+                payload={"text": "你好"},
+            )
+            response = client.post(
+                "/v1/requests",
+                json={
+                    "request": request.model_dump(mode="json"),
+                    "signature": sign_request(secret, request),
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["summary"] == "计划回答"
+    finally:
+        store.close()
