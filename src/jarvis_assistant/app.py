@@ -597,42 +597,19 @@ def _compose_mobile_bridge(
     controller_factory: Callable[..., MobileServer] | None = None,
 ) -> MobileBridgeComposition:
     """Compose the production LAN Bridge only for an explicitly selected address."""
-    from jarvis_assistant.bridge.device_store import DeviceStore
-    from jarvis_assistant.bridge.idempotency import IdempotencyLedger
-    from jarvis_assistant.bridge.pairing import PairingSessionOwner
-    from jarvis_assistant.bridge.server import BridgeServerController, create_bridge_app
-    from jarvis_assistant.bridge.service import BridgeService
-    from jarvis_assistant.bridge.tls import BridgeTLSIdentity, create_server_ssl_context
+    from jarvis_assistant.lan_bridge import compose_lan_bridge
 
-    identity = BridgeTLSIdentity.load_or_create(
-        certificate_path=base_dir / "bridge-cert.pem",
-        credential_backend=credentials._backend,
-        bridge_id="jarvis-desktop",
-        hosts=(host,),
-    )
-    ssl_context = create_server_ssl_context(
-        identity,
-        certificate_path=base_dir / "bridge-cert.pem",
-        temporary_directory=base_dir,
-    )
-    pairing_owner = PairingSessionOwner(
-        bridge_id="jarvis-desktop",
-        bridge_url=f"https://{host}:8443",
-        certificate_sha256=identity.certificate_sha256,
-    )
-    service = BridgeService(device_store=DeviceStore(store, credentials._backend),
-        ledger=IdempotencyLedger(store), registry=registry,
-        pairing_session_owner=pairing_owner,
-        chat_dispatcher=lambda text: _dispatch_orchestrator_chat(orchestrator, text))
-    controller_type = controller_factory or BridgeServerController
-    controller = controller_type(
-        create_bridge_app(service),
+    composition = compose_lan_bridge(
+        store=store,
+        registry=registry,
+        base_dir=base_dir,
+        credentials=credentials,
         host=host,
-        ssl_context=ssl_context,
+        controller_factory=controller_factory,
     )
     return MobileBridgeComposition(
-        controller=controller,
-        pairing_session_owner=pairing_owner,
+        controller=composition.controller,
+        pairing_session_owner=composition.pairing_session_owner,
     )
 
 
