@@ -4,7 +4,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event, Lock
+from threading import Barrier, Event, Lock
 
 import pytest
 
@@ -557,12 +557,13 @@ async def test_chat_request_dispatches_once_and_persists_response(tmp_path: Path
 def test_bridge_audit_settings_and_revoke_writes_share_one_transaction_boundary(
     tmp_path: Path,
 ) -> None:
-    """Regression for cross-component writes on the shared SQLite connection."""
+    """Concurrent bridge writes must not cause SQLite or transaction failures."""
     service, store, _ = make_service(tmp_path / "state.db")
     request = bridge_request()
+    start = Barrier(4)
 
-    def submit() -> None:
-        service.submit(request, signed(request))
+    def submit():
+        return service.submit(request, signed(request))
 
     def audit() -> None:
         store.record_audit("set_volume", {"percent": 35}, True, "ok")
@@ -573,12 +574,28 @@ def test_bridge_audit_settings_and_revoke_writes_share_one_transaction_boundary(
     def revoke() -> None:
         service.device_store.revoke("iphone-1")
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(operation) for operation in (submit, audit, settings, revoke)]
-        for future in futures:
-            future.result(timeout=2)
+    def run(operation: Callable[[], object]) -> object:
+        start.wait(timeout=2)
+        try:
+            return operation()
+        except Exception as error:
+            return error
 
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(run, operation)
+            for operation in (submit, audit, settings, revoke)
+        ]
+        results = [future.result(timeout=2) for future in futures]
+
+    errors = [result for result in results if isinstance(result, Exception)]
+    assert all(isinstance(error, BridgeAuthenticationError) for error in errors)
+    assert {str(error) for error in errors} <= {
+        "revoked device",
+        "device credential unavailable",
+    }
     assert store.list_audit(1)[0].tool_name == "set_volume"
+    assert service.device_store.get_device("iphone-1").revoked
 
 
 @pytest.fixture
