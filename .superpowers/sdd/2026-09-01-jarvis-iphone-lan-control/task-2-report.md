@@ -40,6 +40,55 @@ The term 'swift' is not recognized as a name of a cmdlet, function, script file,
 No whitespace errors reported. Git printed existing LF/CRLF conversion warnings for the worktree.
 ```
 
+## Round 2 Fixes
+
+### Review items addressed
+
+- iOS confirmation signing now authenticates the canonical `{request, confirmation}` envelope instead of the `BridgeRequest` alone.
+- Desktop bridge confirm/cancel handling now requires an explicit `TaskConfirmation`, validates its signed `decision` and fresh `decided_at`, and rejects legacy request-only confirmation envelopes.
+- The desktop HTTP confirm endpoint now parses the stricter confirmation envelope and forwards the validated decision used for confirm versus cancel handling.
+
+### Additional tests added or updated
+
+- Python auth tests now cover confirmation tampering and stale signed confirmations.
+- Python service tests now cover rejection of legacy request-only signatures and mismatched signed decisions.
+- Python server tests now cover HTTP rejection of legacy confirm envelopes and acceptance of the new signed confirmation contract.
+- iOS confirmation serialization tests now assert the emitted signature matches the combined request-plus-confirmation payload and differs from the old request-only signature.
+
+### Additional verification on 2026-09-01
+
+1. `$env:PYTHONPATH='src'; G:\Scripts\pytest.exe tests\bridge\test_auth.py tests\bridge\test_service.py tests\bridge\test_server.py`
+2. `$env:PYTHONPATH='src'; G:\Scripts\ruff.exe check src\jarvis_assistant\bridge tests\bridge`
+3. `swift test --package-path ios --filter JarvisCoreTests/BridgeClientTests`
+4. `git diff --check`
+
+### Additional output
+
+`$env:PYTHONPATH='src'; G:\Scripts\pytest.exe tests\bridge\test_auth.py tests\bridge\test_service.py tests\bridge\test_server.py`
+
+```text
+61 passed in 1.39s
+```
+
+`$env:PYTHONPATH='src'; G:\Scripts\ruff.exe check src\jarvis_assistant\bridge tests\bridge`
+
+```text
+All checks passed!
+```
+
+`swift test --package-path ios --filter JarvisCoreTests/BridgeClientTests`
+
+```text
+swift:
+The term 'swift' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+`git diff --check`
+
+```text
+No whitespace errors reported. Git printed existing LF/CRLF conversion warnings for the worktree.
+```
+
 ## Notes
 
 - Swift/Xcode tooling is unavailable in this Windows environment, so the new iOS tests were written and reviewed but not compiled or executed locally.

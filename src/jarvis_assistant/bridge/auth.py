@@ -4,7 +4,11 @@ import hashlib
 import hmac
 from datetime import UTC, datetime
 
-from jarvis_assistant.bridge.protocol import BridgeRequest
+from jarvis_assistant.bridge.protocol import (
+    BridgeRequest,
+    TaskConfirmation,
+    canonical_confirmation_bytes,
+)
 
 
 class AuthenticationError(ValueError):
@@ -15,13 +19,30 @@ def sign_request(secret: bytes, request: BridgeRequest) -> str:
     return hmac.new(secret, request.canonical_bytes(), hashlib.sha256).hexdigest()
 
 
+def sign_confirmation(
+    secret: bytes,
+    request: BridgeRequest,
+    confirmation: TaskConfirmation,
+) -> str:
+    return hmac.new(
+        secret,
+        canonical_confirmation_bytes(request, confirmation),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def verify_request(
     secret: bytes,
     request: BridgeRequest,
     signature: str,
     now: datetime,
+    confirmation: TaskConfirmation | None = None,
 ) -> None:
-    expected_signature = sign_request(secret, request)
+    expected_signature = (
+        sign_confirmation(secret, request, confirmation)
+        if confirmation is not None
+        else sign_request(secret, request)
+    )
     if not _is_lowercase_hex_signature(signature, len(expected_signature)):
         raise AuthenticationError("invalid signature")
     if not hmac.compare_digest(expected_signature, signature):
@@ -35,6 +56,14 @@ def verify_request(
         raise AuthenticationError("request expired")
     if age_seconds < -30:
         raise AuthenticationError("request timestamp is too far in the future")
+    if confirmation is not None:
+        confirmation_age_seconds = (
+            now.astimezone(UTC) - _parse_utc_timestamp(confirmation.decided_at)
+        ).total_seconds()
+        if confirmation_age_seconds > 300:
+            raise AuthenticationError("confirmation expired")
+        if confirmation_age_seconds < -30:
+            raise AuthenticationError("confirmation timestamp is too far in the future")
 
 
 def _parse_utc_timestamp(value: str) -> datetime:

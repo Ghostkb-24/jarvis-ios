@@ -6,8 +6,44 @@ public enum RequestSigner {
         try request.canonicalData()
     }
 
+    public static func canonicalSigningPayload(
+        for request: BridgeRequest,
+        confirmation: TaskConfirmation
+    ) throws -> Data {
+        let object: [String: JSONValue] = [
+            "request": .object([
+                "version": .integer(Int64(request.version)),
+                "request_id": .string(request.requestID),
+                "device_id": .string(request.deviceID),
+                "issued_at": .string(request.issuedAt),
+                "idempotency_key": .string(request.idempotencyKey),
+                "kind": .string(request.kind.rawValue),
+                "payload": .object(request.payload),
+            ]),
+            "confirmation": .object([
+                "version": .integer(Int64(confirmation.version)),
+                "request_id": .string(confirmation.requestID),
+                "task_id": .string(confirmation.taskID),
+                "decision": .string(confirmation.decision.rawValue),
+                "decided_at": .string(confirmation.decidedAt),
+            ]),
+        ]
+        return Data(try CanonicalJSON.serialize(.object(object)).utf8)
+    }
+
     public static func signature(for request: BridgeRequest, secret: Data) throws -> String {
         try signature(for: canonicalSigningPayload(for: request), secret: secret)
+    }
+
+    public static func signature(
+        for request: BridgeRequest,
+        confirmation: TaskConfirmation,
+        secret: Data
+    ) throws -> String {
+        try signature(
+            for: canonicalSigningPayload(for: request, confirmation: confirmation),
+            secret: secret
+        )
     }
 
     public static func signature(for canonicalRequestData: Data, secret: Data) throws -> String {

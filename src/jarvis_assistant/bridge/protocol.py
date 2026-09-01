@@ -42,6 +42,41 @@ class BridgeRequest(BaseModel):
         ).encode("utf-8")
 
 
+class ConfirmationDecision(StrEnum):
+    APPROVE = "approve"
+    DECLINE = "decline"
+
+
+class TaskConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[1]
+    request_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    decision: ConfirmationDecision
+    decided_at: str
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
+def canonical_confirmation_bytes(request: BridgeRequest, confirmation: TaskConfirmation) -> bytes:
+    return json.dumps(
+        {
+            "request": request.model_dump(mode="json"),
+            "confirmation": confirmation.model_dump(mode="json"),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class BridgeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

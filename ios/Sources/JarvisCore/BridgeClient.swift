@@ -492,7 +492,11 @@ public struct BridgeClient: Sendable {
         request: BridgeRequest,
         confirmation: TaskConfirmation
     ) throws -> URLRequest {
-        let signature = try RequestSigner.signature(for: request, secret: credentials.secret)
+        let signature = try RequestSigner.signature(
+            for: request,
+            confirmation: confirmation,
+            secret: credentials.secret
+        )
         let envelope = try SignedTaskConfirmationEnvelope(
             request: request,
             confirmation: confirmation,

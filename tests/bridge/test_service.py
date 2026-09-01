@@ -8,11 +8,11 @@ from threading import Barrier, Event, Lock
 
 import pytest
 
-from jarvis_assistant.bridge.auth import sign_request
+from jarvis_assistant.bridge.auth import sign_confirmation, sign_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyConflict, IdempotencyLedger
 from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession, PairingSessionOwner
-from jarvis_assistant.bridge.protocol import BridgeRequest, Risk, TaskState
+from jarvis_assistant.bridge.protocol import BridgeRequest, Risk, TaskConfirmation, TaskState
 from jarvis_assistant.bridge.service import (
     BridgeAuthenticationError,
     BridgeAuthorizationError,
@@ -140,6 +140,30 @@ def make_service(
 
 def signed(request: BridgeRequest, secret: bytes = DEVICE_SECRET) -> str:
     return sign_request(secret, request)
+
+
+def task_confirmation(
+    request: BridgeRequest,
+    *,
+    task_id: str = "req-1",
+    decision: str | None = None,
+    decided_at: datetime = NOW,
+) -> TaskConfirmation:
+    return TaskConfirmation(
+        version=1,
+        request_id=request.request_id,
+        task_id=task_id,
+        decision=decision or ("approve" if request.kind == "confirm" else "decline"),
+        decided_at=decided_at.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def signed_confirmation(
+    request: BridgeRequest,
+    confirmation: TaskConfirmation,
+    secret: bytes = DEVICE_SECRET,
+) -> str:
+    return sign_confirmation(secret, request, confirmation)
 
 
 def test_pairing_claim_uses_the_exact_session_currently_shown_by_owner(tmp_path: Path) -> None:
@@ -301,7 +325,15 @@ def test_restarted_sensitive_confirmation_never_executes_redacted_arguments(tmp_
         kind="confirm", payload={"target_request_id": request.request_id},
     )
 
-    response = restarted.confirm(request.request_id, confirmation, signed(confirmation))
+    response = restarted.confirm(
+        request.request_id,
+        confirmation,
+        task_confirmation(confirmation, task_id=request.request_id),
+        signed_confirmation(
+            confirmation,
+            task_confirmation(confirmation, task_id=request.request_id),
+        ),
+    )
 
     assert response.state is TaskState.RESULT_UNKNOWN
     assert sent == []
@@ -427,8 +459,10 @@ def test_wechat_waits_for_owner_confirmation_and_replay_executes_once(tmp_path: 
         kind="confirm",
         payload={"target_request_id": request.request_id},
     )
-    completed = service.confirm(request.request_id, confirmation, signed(confirmation))
-    replayed = service.confirm(request.request_id, confirmation, signed(confirmation))
+    approval = task_confirmation(confirmation, task_id=request.request_id)
+    signature = signed_confirmation(confirmation, approval)
+    completed = service.confirm(request.request_id, confirmation, approval, signature)
+    replayed = service.confirm(request.request_id, confirmation, approval, signature)
 
     assert completed.state is TaskState.COMPLETED
     assert replayed == completed
@@ -455,7 +489,16 @@ def test_other_device_cannot_confirm_task(tmp_path: Path) -> None:
     )
 
     with pytest.raises(BridgeAuthorizationError, match="owner"):
-        service.confirm(request.request_id, confirmation, signed(confirmation, OTHER_SECRET))
+        service.confirm(
+            request.request_id,
+            confirmation,
+            task_confirmation(confirmation, task_id=request.request_id),
+            signed_confirmation(
+                confirmation,
+                task_confirmation(confirmation, task_id=request.request_id),
+                OTHER_SECRET,
+            ),
+        )
 
 
 def test_cancellation_is_terminal_and_never_executes(tmp_path: Path) -> None:
@@ -476,8 +519,10 @@ def test_cancellation_is_terminal_and_never_executes(tmp_path: Path) -> None:
         payload={"target_request_id": request.request_id},
     )
 
-    cancelled = service.confirm(request.request_id, cancellation, signed(cancellation))
-    replayed = service.confirm(request.request_id, cancellation, signed(cancellation))
+    decline = task_confirmation(cancellation, task_id=request.request_id)
+    signature = signed_confirmation(cancellation, decline)
+    cancelled = service.confirm(request.request_id, cancellation, decline, signature)
+    replayed = service.confirm(request.request_id, cancellation, decline, signature)
 
     assert cancelled.state is TaskState.CANCELLED
     assert replayed == cancelled
@@ -523,10 +568,71 @@ def test_bridge_never_opens_a_file_without_configured_allowed_roots(tmp_path: Pa
     )
 
     assert service.submit(request, signed(request)).state is TaskState.AWAITING_CONFIRMATION
-    response = service.confirm(request.request_id, confirmation, signed(confirmation))
+    approval = task_confirmation(confirmation, task_id=request.request_id)
+    response = service.confirm(
+        request.request_id,
+        confirmation,
+        approval,
+        signed_confirmation(confirmation, approval),
+    )
 
     assert response.state is TaskState.FAILED
     assert launched == []
+
+
+def test_confirmation_rejects_legacy_request_only_signature(tmp_path: Path) -> None:
+    """Fails if confirm/cancel can bypass signed decision and timestamp fields."""
+    sent_messages: list[tuple[str, str]] = []
+    service, _, _ = make_service(tmp_path / "state.db", sent_messages=sent_messages)
+    request = bridge_request(
+        payload={
+            "tool": "send_wechat_message",
+            "arguments": {"contact": "Alice", "message": "Meet at eight"},
+        }
+    )
+    service.submit(request, signed(request))
+    confirmation = bridge_request(
+        request_id="confirm-legacy",
+        idempotency_key="confirm-legacy-idem",
+        kind="confirm",
+        payload={"target_request_id": request.request_id},
+    )
+    approval = task_confirmation(confirmation, task_id=request.request_id)
+
+    with pytest.raises(BridgeAuthenticationError, match="signature"):
+        service.confirm(request.request_id, confirmation, approval, signed(confirmation))
+
+
+def test_confirmation_rejects_mismatched_signed_decision(tmp_path: Path) -> None:
+    """Fails if a signed decline can be replayed through the confirm path or vice versa."""
+    sent_messages: list[tuple[str, str]] = []
+    service, _, _ = make_service(tmp_path / "state.db", sent_messages=sent_messages)
+    request = bridge_request(
+        payload={
+            "tool": "send_wechat_message",
+            "arguments": {"contact": "Alice", "message": "Meet at eight"},
+        }
+    )
+    service.submit(request, signed(request))
+    confirmation = bridge_request(
+        request_id="confirm-mismatch",
+        idempotency_key="confirm-mismatch-idem",
+        kind="confirm",
+        payload={"target_request_id": request.request_id},
+    )
+    decline = task_confirmation(
+        confirmation,
+        task_id=request.request_id,
+        decision="decline",
+    )
+
+    with pytest.raises(BridgeValidationError, match="decision"):
+        service.confirm(
+            request.request_id,
+            confirmation,
+            decline,
+            signed_confirmation(confirmation, decline),
+        )
 
 
 @pytest.mark.asyncio

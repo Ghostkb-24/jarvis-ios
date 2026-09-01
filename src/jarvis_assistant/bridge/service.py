@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -11,7 +11,13 @@ from jarvis_assistant.bridge.auth import AuthenticationError, verify_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyLedger, TaskRecord
 from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession, PairingSessionOwner
-from jarvis_assistant.bridge.protocol import BridgeRequest, BridgeResponse, Risk, TaskState
+from jarvis_assistant.bridge.protocol import (
+    BridgeRequest,
+    BridgeResponse,
+    Risk,
+    TaskConfirmation,
+    TaskState,
+)
 from jarvis_assistant.domain import ToolProposal
 from jarvis_assistant.tools import ToolRegistry
 
@@ -39,6 +45,14 @@ class _ToolPayload(_StrictModel):
 
 class _TargetPayload(_StrictModel):
     target_request_id: str = Field(min_length=1)
+
+
+class _TaskConfirmationPayload(_StrictModel):
+    version: Literal[1]
+    request_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    decision: Literal["approve", "decline"]
+    decided_at: str
 
 
 class _ChatPayload(_StrictModel):
@@ -155,7 +169,12 @@ class BridgeService:
         self.device_store.save(device)
         return device
 
-    def authenticate(self, request: BridgeRequest, signature: str) -> None:
+    def authenticate(
+        self,
+        request: BridgeRequest,
+        signature: str,
+        confirmation: TaskConfirmation | None = None,
+    ) -> None:
         device = self.device_store.get_device(request.device_id)
         if device is None:
             raise BridgeAuthenticationError("unknown device")
@@ -165,7 +184,13 @@ class BridgeService:
         if secret is None:
             raise BridgeAuthenticationError("device credential unavailable")
         try:
-            verify_request(secret, request, signature, self._now())
+            verify_request(
+                secret,
+                request,
+                signature,
+                self._now(),
+                confirmation=confirmation,
+            )
         except AuthenticationError as error:
             raise BridgeAuthenticationError(str(error)) from error
 
@@ -269,14 +294,20 @@ class BridgeService:
         self,
         request_id: str,
         confirmation: BridgeRequest,
+        task_confirmation: TaskConfirmation,
         signature: str,
     ) -> BridgeResponse:
-        self.authenticate(confirmation, signature)
+        self.authenticate(confirmation, signature, task_confirmation)
         if confirmation.kind not in {"confirm", "cancel"}:
             raise BridgeValidationError("confirmation endpoint requires confirm or cancel")
         target = self._validate_target(confirmation.payload)
         if target != request_id:
             raise BridgeValidationError("signed target does not match request path")
+        self._validate_confirmation_contract(
+            request_id,
+            confirmation,
+            task_confirmation,
+        )
         record = self._ledger.get(request_id)
         if record is None:
             raise KeyError(request_id)
@@ -347,6 +378,30 @@ class BridgeService:
             return _TargetPayload.model_validate(payload).target_request_id
         except ValidationError as error:
             raise BridgeValidationError("invalid target arguments") from error
+
+    @staticmethod
+    def _validate_confirmation_contract(
+        request_id: str,
+        request: BridgeRequest,
+        confirmation: TaskConfirmation,
+    ) -> None:
+        try:
+            validated = _TaskConfirmationPayload.model_validate(
+                confirmation.model_dump(mode="json")
+            )
+        except ValidationError as error:
+            raise BridgeValidationError("invalid task confirmation") from error
+        if validated.request_id != request.request_id:
+            raise BridgeValidationError(
+                "task confirmation request_id does not match signed request"
+            )
+        if validated.task_id != request_id:
+            raise BridgeValidationError("task confirmation task_id does not match request path")
+        expected_decision = "approve" if request.kind == "confirm" else "decline"
+        if validated.decision != expected_decision:
+            raise BridgeValidationError(
+                "task confirmation decision does not match signed request kind"
+            )
 
     @staticmethod
     def _require_owner(record: TaskRecord, device_id: str) -> None:

@@ -8,11 +8,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from jarvis_assistant.bridge.auth import sign_request
+from jarvis_assistant.bridge.auth import sign_confirmation, sign_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyLedger
 from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession
-from jarvis_assistant.bridge.protocol import BridgeRequest
+from jarvis_assistant.bridge.protocol import BridgeRequest, TaskConfirmation
 from jarvis_assistant.bridge.server import (
     BridgeServerController,
     create_bridge_app,
@@ -91,6 +91,18 @@ def request_json(
     }
 
 
+def confirmation_json(
+    request: BridgeRequest,
+    confirmation: TaskConfirmation,
+    secret: bytes = SECRET,
+) -> dict:
+    return {
+        "request": request.model_dump(mode="json"),
+        "confirmation": confirmation.model_dump(mode="json"),
+        "signature": sign_confirmation(secret, request, confirmation),
+    }
+
+
 def volume_request() -> BridgeRequest:
     return BridgeRequest(
         version=1,
@@ -100,6 +112,28 @@ def volume_request() -> BridgeRequest:
         idempotency_key="idem-1",
         kind="tool",
         payload={"tool": "set_volume", "arguments": {"percent": 40}},
+    )
+
+
+def confirm_request() -> BridgeRequest:
+    return BridgeRequest(
+        version=1,
+        request_id="confirm-1",
+        device_id="iphone-1",
+        issued_at="2026-08-28T12:00:00Z",
+        idempotency_key="confirm-idem-1",
+        kind="confirm",
+        payload={"target_request_id": "req-1"},
+    )
+
+
+def approval() -> TaskConfirmation:
+    return TaskConfirmation(
+        version=1,
+        request_id="confirm-1",
+        task_id="req-1",
+        decision="approve",
+        decided_at="2026-08-28T12:00:00Z",
     )
 
 
@@ -148,6 +182,42 @@ async def test_submit_and_signed_status_lookup(tmp_path: Path) -> None:
     assert submitted.status_code == 200
     assert fetched.status_code == 200
     assert fetched.json() == submitted.json()
+
+
+async def test_confirm_endpoint_requires_signed_task_confirmation(tmp_path: Path) -> None:
+    """Fails if the HTTP boundary still accepts legacy request-only confirmation signatures."""
+    app, _, _ = make_app(tmp_path)
+    request = BridgeRequest(
+        version=1,
+        request_id="req-1",
+        device_id="iphone-1",
+        issued_at="2026-08-28T12:00:00Z",
+        idempotency_key="idem-1",
+        kind="tool",
+        payload={
+            "tool": "send_wechat_message",
+            "arguments": {"contact": "Alice", "message": "Meet at eight"},
+        },
+    )
+    confirmation_request = confirm_request()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://bridge.test",
+    ) as client:
+        submitted = await client.post("/v1/requests", json=request_json(request))
+        legacy = await client.post(
+            "/v1/tasks/req-1/confirm",
+            json=request_json(confirmation_request),
+        )
+        confirmed = await client.post(
+            "/v1/tasks/req-1/confirm",
+            json=confirmation_json(confirmation_request, approval()),
+        )
+
+    assert submitted.status_code == 202
+    assert legacy.status_code == 422
+    assert confirmed.status_code == 200
 
 
 async def test_pair_claim_succeeds_once_and_persists_device(tmp_path: Path) -> None:

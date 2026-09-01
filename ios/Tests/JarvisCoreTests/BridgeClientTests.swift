@@ -488,12 +488,52 @@ final class BridgeClientTests: XCTestCase {
         )
         let approved = try XCTUnwrap(confirmationEnvelope["confirmation"] as? [String: Any])
         let declined = try XCTUnwrap(cancellationEnvelope["confirmation"] as? [String: Any])
+        let approvalSignature = try XCTUnwrap(confirmationEnvelope["signature"] as? String)
+        let declineSignature = try XCTUnwrap(cancellationEnvelope["signature"] as? String)
         XCTAssertEqual(approved["decision"] as? String, "approve")
         XCTAssertEqual(declined["decision"] as? String, "decline")
         XCTAssertEqual(approved["task_id"] as? String, "req-1")
         XCTAssertEqual(declined["task_id"] as? String, "req-1")
-        XCTAssertNotNil(approved["decided_at"] as? String)
-        XCTAssertNotNil(declined["decided_at"] as? String)
+        let approvedTimestamp = try XCTUnwrap(approved["decided_at"] as? String)
+        let declinedTimestamp = try XCTUnwrap(declined["decided_at"] as? String)
+        let approvedConfirmation = try TaskConfirmation(
+            version: 1,
+            requestID: "confirm-1",
+            taskID: "req-1",
+            decision: .approve,
+            decidedAt: approvedTimestamp
+        )
+        let declinedConfirmation = try TaskConfirmation(
+            version: 1,
+            requestID: "cancel-1",
+            taskID: "req-1",
+            decision: .decline,
+            decidedAt: declinedTimestamp
+        )
+        XCTAssertEqual(
+            approvalSignature,
+            try RequestSigner.signature(
+                for: confirmation,
+                confirmation: approvedConfirmation,
+                secret: makeCredentials().secret
+            )
+        )
+        XCTAssertEqual(
+            declineSignature,
+            try RequestSigner.signature(
+                for: cancellation,
+                confirmation: declinedConfirmation,
+                secret: makeCredentials().secret
+            )
+        )
+        XCTAssertNotEqual(
+            approvalSignature,
+            try RequestSigner.signature(for: confirmation, secret: makeCredentials().secret)
+        )
+        XCTAssertNotEqual(
+            declineSignature,
+            try RequestSigner.signature(for: cancellation, secret: makeCredentials().secret)
+        )
     }
 }
 

@@ -14,7 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from jarvis_assistant.bridge.idempotency import IdempotencyConflict
 from jarvis_assistant.bridge.pairing import PairingClaimError
-from jarvis_assistant.bridge.protocol import BridgeRequest, BridgeResponse, TaskState
+from jarvis_assistant.bridge.protocol import (
+    BridgeRequest,
+    BridgeResponse,
+    TaskConfirmation,
+    TaskState,
+)
 from jarvis_assistant.bridge.service import (
     BridgeAuthenticationError,
     BridgeAuthorizationError,
@@ -34,6 +39,12 @@ class _StrictModel(BaseModel):
 
 class SignedBridgeRequest(_StrictModel):
     request: BridgeRequest
+    signature: str = Field(min_length=1)
+
+
+class SignedTaskConfirmation(_StrictModel):
+    request: BridgeRequest
+    confirmation: TaskConfirmation
     signature: str = Field(min_length=1)
 
 
@@ -93,10 +104,15 @@ def create_bridge_app(service: BridgeService) -> FastAPI:
     @app.post("/v1/tasks/{request_id}/confirm", response_model=BridgeResponse)
     async def confirm_task(
         request_id: str,
-        envelope: SignedBridgeRequest,
+        envelope: SignedTaskConfirmation,
     ) -> BridgeResponse:
         try:
-            return service.confirm(request_id, envelope.request, envelope.signature)
+            return service.confirm(
+                request_id,
+                envelope.request,
+                envelope.confirmation,
+                envelope.signature,
+            )
         except Exception as error:
             _raise_http_error(error)
 

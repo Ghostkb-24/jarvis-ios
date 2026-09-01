@@ -2,8 +2,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from jarvis_assistant.bridge.auth import AuthenticationError, sign_request, verify_request
-from jarvis_assistant.bridge.protocol import BridgeRequest
+from jarvis_assistant.bridge.auth import (
+    AuthenticationError,
+    sign_confirmation,
+    sign_request,
+    verify_request,
+)
+from jarvis_assistant.bridge.protocol import BridgeRequest, TaskConfirmation
 
 SECRET = b"shared-bridge-secret"
 NOW = datetime(2026, 8, 28, 0, 5, tzinfo=UTC)
@@ -18,6 +23,22 @@ def make_request(issued_at: str = "2026-08-28T00:00:00Z") -> BridgeRequest:
         idempotency_key="idem-1",
         kind="chat",
         payload={"text": "hello"},
+    )
+
+
+def make_confirmation(
+    *,
+    request_id: str = "confirm-1",
+    task_id: str = "req-1",
+    decision: str = "approve",
+    decided_at: str = "2026-08-28T00:00:00Z",
+) -> TaskConfirmation:
+    return TaskConfirmation(
+        version=1,
+        request_id=request_id,
+        task_id=task_id,
+        decision=decision,
+        decided_at=decided_at,
     )
 
 
@@ -45,6 +66,22 @@ def test_verify_request_rejects_signature_after_payload_tampering() -> None:
         verify_request(SECRET, tampered_request, signature, NOW)
 
 
+def test_verify_request_rejects_confirmation_tampering_when_signature_covers_both_objects() -> None:
+    """Fails if confirm/cancel signatures authenticate only the request wrapper."""
+    request = make_request()
+    signature = sign_confirmation(SECRET, request, make_confirmation())
+    tampered_confirmation = make_confirmation(decision="decline")
+
+    with pytest.raises(AuthenticationError, match="signature"):
+        verify_request(
+            SECRET,
+            request,
+            signature,
+            NOW,
+            confirmation=tampered_confirmation,
+        )
+
+
 def test_verify_request_rejects_expired_request() -> None:
     """Fails if requests older than five minutes remain valid."""
     request = make_request("2026-08-27T23:59:59Z")
@@ -59,6 +96,21 @@ def test_verify_request_rejects_request_too_far_in_the_future() -> None:
 
     with pytest.raises(AuthenticationError, match="future"):
         verify_request(SECRET, request, sign_request(SECRET, request), NOW)
+
+
+def test_verify_request_rejects_expired_confirmation() -> None:
+    """Fails if stale approvals remain valid after the request freshness window."""
+    request = make_request()
+    confirmation = make_confirmation(decided_at="2026-08-27T23:59:59Z")
+
+    with pytest.raises(AuthenticationError, match="confirmation expired"):
+        verify_request(
+            SECRET,
+            request,
+            sign_confirmation(SECRET, request, confirmation),
+            NOW,
+            confirmation=confirmation,
+        )
 
 
 @pytest.mark.parametrize("issued_at", ["not-a-timestamp", "2026-08-28T01:00:00+01:00"])
