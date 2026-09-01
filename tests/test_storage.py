@@ -1,3 +1,7 @@
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, get_ident
+
 from jarvis_assistant.domain import Settings
 from jarvis_assistant.storage import CredentialStore, SQLiteStore
 
@@ -28,6 +32,60 @@ def test_audit_redacts_user_profile_path(tmp_path, monkeypatch) -> None:
     event = store.list_audit(1)[0]
     assert "%USERPROFILE%" in event.arguments_summary
     assert "Alice" not in event.arguments_summary
+    store.close()
+
+
+def test_file_store_isolates_connections_for_concurrent_settings_and_audit_work(tmp_path) -> None:
+    store = SQLiteStore.open(tmp_path / "state.db")
+    barrier = Barrier(3)
+
+    def bridge_settings_worker(index: int) -> tuple[int, int, int, str]:
+        barrier.wait()
+        connection = store.connection
+        store.save_settings(Settings(ollama_model=f"bridge-{index}"))
+        return (
+            get_ident(),
+            id(connection),
+            connection.execute("pragma busy_timeout").fetchone()[0],
+            connection.execute("pragma journal_mode").fetchone()[0],
+        )
+
+    def device_audit_worker(index: int) -> tuple[int, int, int, str]:
+        barrier.wait()
+        connection = store.connection
+        store.record_audit("device_store", {"device": index}, True, "saved")
+        return (
+            get_ident(),
+            id(connection),
+            connection.execute("pragma busy_timeout").fetchone()[0],
+            connection.execute("pragma journal_mode").fetchone()[0],
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(bridge_settings_worker, 1),
+            executor.submit(device_audit_worker, 2),
+            executor.submit(device_audit_worker, 3),
+        ]
+        worker_connections = [future.result() for future in futures]
+
+    assert len({thread_id for thread_id, _, _, _ in worker_connections}) == 3
+    assert len({connection_id for _, connection_id, _, _ in worker_connections}) == 3
+    connection_settings = {
+        (busy_timeout, journal_mode)
+        for _, _, busy_timeout, journal_mode in worker_connections
+    }
+    assert connection_settings == {(5000, "wal")}
+    assert {event.tool_name for event in store.list_audit()} == {"device_store"}
+    store.close()
+
+
+def test_injected_connection_api_remains_available_for_memory_tests() -> None:
+    connection = sqlite3.connect(":memory:")
+    store = SQLiteStore(connection)
+
+    assert store.connection is connection
+    assert connection.row_factory is sqlite3.Row
     store.close()
 
 
