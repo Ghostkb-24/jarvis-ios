@@ -443,28 +443,6 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         self.devicePublicKey = devicePublicKey
     }
 
-    public init(
-        version: Int,
-        bridgeID: String,
-        bridgeURL: String,
-        certificateFingerprint: String,
-        sessionID: String,
-        expiresAt: String,
-        proof: String
-    ) throws {
-        try self.init(
-            version: version,
-            bridgeID: bridgeID,
-            bridgeURL: bridgeURL,
-            certificateFingerprint: certificateFingerprint,
-            sessionID: sessionID,
-            expiresAt: expiresAt,
-            proof: proof,
-            deviceID: sessionID,
-            devicePublicKey: String(repeating: "0", count: 64)
-        )
-    }
-
     public init(from decoder: Decoder) throws {
         try validateNoUnknownFields(
             decoder,

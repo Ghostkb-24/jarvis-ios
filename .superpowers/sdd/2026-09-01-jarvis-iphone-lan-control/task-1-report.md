@@ -150,3 +150,48 @@ No diff-format errors were reported.
 ### Residual note
 
 - To preserve source compatibility for existing non-Task-1 call sites, `PairingPayload` keeps a compatibility initializer that synthesizes placeholder identity/key values. The stricter wire-level initializer and decoding path require explicit identity binding, but downstream transport callers should migrate to the full initializer in a later task.
+
+## Fix round 2
+
+### Review item addressed
+
+- Removed the public `PairingPayload` convenience initializer that fabricated `deviceID` from `sessionID` and used a zero public key.
+- Updated the affected caller in `ios/Tests/JarvisCoreTests/BridgeClientTests.swift` so pairing payload construction now always passes explicit `deviceID` and `devicePublicKey` values.
+- Validation remains strict: pairing payload creation still requires real non-empty identity plus a 64-character lowercase-hex public key.
+
+### Verification
+
+Attempted focused Swift test command again:
+
+```powershell
+swift test --filter JarvisProtocolTests
+```
+
+Output:
+
+```text
+The term 'swift' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+Toolchain availability check:
+
+```powershell
+Get-Command swift,swiftc,xcrun -ErrorAction SilentlyContinue | Select-Object Name,Source
+```
+
+Output: no results.
+
+Patch hygiene check:
+
+```powershell
+git diff --check -- ios/Sources/JarvisProtocol/BridgeModels.swift ios/Tests/JarvisProtocolTests/BridgeModelsTests.swift ios/Tests/JarvisCoreTests/BridgeClientTests.swift
+```
+
+Output:
+
+```text
+warning: in the working copy of 'ios/Sources/JarvisProtocol/BridgeModels.swift', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ios/Tests/JarvisCoreTests/BridgeClientTests.swift', LF will be replaced by CRLF the next time Git touches it
+```
+
+No diff-format errors were reported.

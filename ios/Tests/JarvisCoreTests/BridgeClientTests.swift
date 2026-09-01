@@ -581,7 +581,9 @@ private extension BridgeClientTests {
             certificateFingerprint: String(repeating: "ab", count: 32),
             sessionID: "session-1",
             expiresAt: "2026-08-28T00:02:00+00:00",
-            proof: "one-time-proof"
+            proof: "one-time-proof",
+            deviceID: "iphone-1",
+            devicePublicKey: String(repeating: "cd", count: 32)
         )
     }
 
