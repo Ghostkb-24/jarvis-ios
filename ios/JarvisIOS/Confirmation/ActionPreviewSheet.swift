@@ -64,7 +64,7 @@ struct ActionPreviewSheet: View {
 
                     Text(
                         preview.allowsApproval
-                            ? "请逐字核对。取消后不会联系电脑客户端，也不会发送消息。"
+                            ? "请逐字核对。取消会向电脑发送取消请求；只有电脑确认取消后，操作才会结束。"
                             : "这类操作保持人工执行。Jarvis 不会绕过付款、删除文件或密码输入限制。"
                     )
                         .font(.footnote)

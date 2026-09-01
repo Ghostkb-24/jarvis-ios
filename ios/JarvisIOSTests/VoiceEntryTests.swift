@@ -268,7 +268,10 @@ final class VoiceEntryTests: XCTestCase {
         DeviceSnapshot(
             computerName: "测试电脑",
             isConnected: true,
+            isPaired: true,
             isCertificatePinned: true,
+            connectionStatus: "已连接",
+            pairingStatus: "已配对",
             modelStatus: "本地模型就绪",
             networkStatus: "同一 Wi-Fi"
         )
@@ -286,6 +289,16 @@ final class VoiceEntryTests: XCTestCase {
 
 private actor RecordingVoiceBridgeClient: JarvisBridgeClient {
     private var submitted: [BridgeRequest] = []
+
+    func connectionState() async -> BridgeConnectionState {
+        .connected(
+            endpoint: .manual(
+                baseURL: URL(string: "https://127.0.0.1")!,
+                certificateFingerprint: String(repeating: "a", count: 64)
+            ),
+            deviceID: "voice-test-iphone"
+        )
+    }
 
     func submit(_ request: BridgeRequest) async throws -> BridgeResponse {
         submitted.append(request)
@@ -306,6 +319,19 @@ private actor RecordingVoiceBridgeClient: JarvisBridgeClient {
             version: 1,
             requestID: requestID,
             state: .completed,
+            risk: .confirmationRequired,
+            payload: [:]
+        )
+    }
+
+    func cancel(
+        _ requestID: String,
+        cancellation: BridgeRequest
+    ) async throws -> BridgeResponse {
+        try BridgeResponse(
+            version: 1,
+            requestID: requestID,
+            state: .cancelled,
             risk: .confirmationRequired,
             payload: [:]
         )

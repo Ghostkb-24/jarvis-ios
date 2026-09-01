@@ -369,6 +369,128 @@ final class AppModelTests: XCTestCase {
     }
 
     @MainActor
+    func testBlockedRejectionDuringConfirmationReplacesExecutingStateWithRefusalPreview() async throws {
+        let client = ControllableBridgeClient()
+        let model = makeModel(client: client)
+
+        XCTAssertTrue(
+            model.submit(
+                proposal: .sendWeChatMessage(
+                    recipient: "宋小宝",
+                    message: "替我输入这个支付密码。"
+                )
+            )
+        )
+        let didSubmit = await waitForSubmitCount(1, client: client)
+        XCTAssertTrue(didSubmit)
+        let submitted = await client.submittedRequests()
+        let request = try XCTUnwrap(submitted.first)
+        await client.completeSubmit(
+            requestID: request.requestID,
+            with: try awaitingConfirmationResponse(for: request.requestID)
+        )
+        let didReachPreview = await waitUntil { model.pendingAction != nil }
+        XCTAssertTrue(didReachPreview)
+        let preview = try XCTUnwrap(model.pendingAction)
+
+        model.allow(preview)
+        let didConfirm = await waitForConfirmationCount(1, client: client)
+        XCTAssertTrue(didConfirm)
+        XCTAssertEqual(model.phase, .executing)
+
+        let confirmation = try XCTUnwrap(await client.confirmations().first)
+        await client.failConfirmation(
+            requestID: confirmation.request.requestID,
+            with: BridgeError.requestRejected(
+                try rejection(
+                    requestID: request.requestID,
+                    reason: .passwordEntryBlocked,
+                    message: "涉及密码输入，已拒绝执行。"
+                )
+            )
+        )
+
+        let didShowBlockedPreview = await waitUntil {
+            model.pendingAction?.refusalReason == .passwordEntryBlocked
+        }
+        XCTAssertTrue(didShowBlockedPreview)
+        let blocked = try XCTUnwrap(model.pendingAction)
+        XCTAssertFalse(blocked.allowsApproval)
+        XCTAssertEqual(model.statusTitle, "无法执行该操作")
+        XCTAssertNotEqual(model.phase, .executing)
+    }
+
+    @MainActor
+    func testFileDeletionBlockedRejectionUsesBlockedPreview() async throws {
+        let client = ControllableBridgeClient()
+        let model = makeModel(client: client)
+
+        XCTAssertTrue(
+            model.submit(
+                proposal: .sendWeChatMessage(
+                    recipient: "宋小宝",
+                    message: "把桌面文件删掉。"
+                )
+            )
+        )
+        let didSubmit = await waitForSubmitCount(1, client: client)
+        XCTAssertTrue(didSubmit)
+        let request = try XCTUnwrap(await client.submittedRequests().first)
+
+        await client.failSubmit(
+            requestID: request.requestID,
+            with: BridgeError.requestRejected(
+                try rejection(
+                    requestID: request.requestID,
+                    reason: .fileDeletionBlocked,
+                    message: "涉及删除文件，已拒绝执行。"
+                )
+            )
+        )
+
+        let didReachPreview = await waitUntil {
+            model.pendingAction?.refusalReason == .fileDeletionBlocked
+        }
+        XCTAssertTrue(didReachPreview)
+        XCTAssertEqual(model.pendingAction?.summary, "涉及删除文件，Jarvis 不会代你确认或删除。")
+    }
+
+    @MainActor
+    func testPasswordEntryBlockedRejectionUsesBlockedPreview() async throws {
+        let client = ControllableBridgeClient()
+        let model = makeModel(client: client)
+
+        XCTAssertTrue(
+            model.submit(
+                proposal: .sendWeChatMessage(
+                    recipient: "宋小宝",
+                    message: "替我输入银行卡密码。"
+                )
+            )
+        )
+        let didSubmit = await waitForSubmitCount(1, client: client)
+        XCTAssertTrue(didSubmit)
+        let request = try XCTUnwrap(await client.submittedRequests().first)
+
+        await client.failSubmit(
+            requestID: request.requestID,
+            with: BridgeError.requestRejected(
+                try rejection(
+                    requestID: request.requestID,
+                    reason: .passwordEntryBlocked,
+                    message: "涉及密码输入，已拒绝执行。"
+                )
+            )
+        )
+
+        let didReachPreview = await waitUntil {
+            model.pendingAction?.refusalReason == .passwordEntryBlocked
+        }
+        XCTAssertTrue(didReachPreview)
+        XCTAssertEqual(model.pendingAction?.summary, "涉及密码输入，Jarvis 不会代你输入或确认。")
+    }
+
+    @MainActor
     private func makeModel(
         client: ControllableBridgeClient,
         phase: AppModel.Phase = .idle,
@@ -387,7 +509,10 @@ final class AppModelTests: XCTestCase {
         DeviceSnapshot(
             computerName: "测试电脑",
             isConnected: true,
+            isPaired: true,
             isCertificatePinned: true,
+            connectionStatus: "已连接",
+            pairingStatus: "已配对",
             modelStatus: "本地模型就绪",
             networkStatus: "同一 Wi-Fi"
         )
@@ -603,6 +728,10 @@ private actor ControllableBridgeClient: JarvisBridgeClient {
 
     func completeConfirmation(requestID: String, with response: BridgeResponse) {
         confirmationContinuations.removeValue(forKey: requestID)?.resume(returning: response)
+    }
+
+    func failConfirmation(requestID: String, with error: any Error) {
+        confirmationContinuations.removeValue(forKey: requestID)?.resume(throwing: error)
     }
 
     func completeCancellation(requestID: String, with response: BridgeResponse) {

@@ -22,3 +22,15 @@ Toolchain limitations
 Open concerns
 - The changes were verified by contract review against `BridgeClient` and the approved Task 3 brief, not by compiling or running XCTest.
 - Git reports line-ending normalization warnings for the edited Swift files on this host.
+
+Round 1 fixes
+- Updated `VoiceEntryTests.swift` and `AppModelTests.swift` fixtures for `DeviceSnapshot.isPaired`, `connectionStatus`, and `pairingStatus`.
+- Updated `RecordingVoiceBridgeClient` and the AppModel test double to implement `connectionState()` and `cancel(_:cancellation:)`; added confirmation-failure support for regression coverage.
+- Aligned `ConversationUITests.swift` connected-state copy with the actual UI label value of `已连接`.
+- Corrected `ActionPreviewSheet` cancel copy to describe the signed cancel request instead of claiming no desktop contact.
+- Fixed blocked rejection handling so a rejection received during the confirmation/executing path can transition into a blocked preview instead of leaving the model stuck in `.executing`.
+- Expanded blocked-risk coverage for payment, file deletion, and password entry refusal flows in unit and UI fixtures.
+
+Round 1 verification
+- `git diff --check -- ios/JarvisIOS/App/AppModel.swift ios/JarvisIOS/Confirmation/ActionPreviewSheet.swift ios/JarvisIOSUITests/ConversationUITests.swift ios/JarvisIOSTests/AppModelTests.swift ios/JarvisIOSTests/VoiceEntryTests.swift` completed without patch-format errors beyond Git's LF/CRLF warnings.
+- Swift/XCTest execution remains unavailable on this Windows host because no `swift` or Xcode toolchain is installed.

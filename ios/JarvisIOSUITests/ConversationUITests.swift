@@ -12,7 +12,7 @@ final class ConversationUITests: XCTestCase {
         launch(fixture: "connected")
 
         XCTAssertTrue(app.staticTexts["connection.status"].waitForExistence(timeout: 2))
-        XCTAssertEqual(app.staticTexts["connection.status"].label, "电脑已连接")
+        XCTAssertEqual(app.staticTexts["connection.status"].label, "已连接")
         XCTAssertTrue(app.buttons["开始说话"].exists)
         XCTAssertTrue(app.textFields["输入消息"].exists)
         XCTAssertTrue(app.staticTexts["Windows 主机可用"].exists)
@@ -98,6 +98,28 @@ final class ConversationUITests: XCTestCase {
         )
         XCTAssertTrue(app.staticTexts["无法执行该操作"].exists)
         XCTAssertTrue(app.staticTexts["涉及付款，Jarvis 不会代你确认或付款。"].exists)
+        XCTAssertFalse(app.buttons["允许并发送"].exists)
+        XCTAssertTrue(app.buttons["知道了"].exists)
+    }
+
+    func testFileDeletionRefusalHidesApprovalControl() {
+        launch(fixture: "blocked-file-deletion")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["confirmation.preview"].waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(app.staticTexts["涉及删除文件，Jarvis 不会代你确认或删除。"].exists)
+        XCTAssertFalse(app.buttons["允许并发送"].exists)
+        XCTAssertTrue(app.buttons["知道了"].exists)
+    }
+
+    func testPasswordRefusalHidesApprovalControl() {
+        launch(fixture: "blocked-password")
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["confirmation.preview"].waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(app.staticTexts["涉及密码输入，Jarvis 不会代你输入或确认。"].exists)
         XCTAssertFalse(app.buttons["允许并发送"].exists)
         XCTAssertTrue(app.buttons["知道了"].exists)
     }

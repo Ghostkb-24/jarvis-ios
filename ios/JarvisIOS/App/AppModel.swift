@@ -303,6 +303,7 @@ public final class AppModel: ObservableObject {
                  (.awaitingConfirmation, .resultUnknown),
                  (.executing, .completed),
                  (.executing, .failed),
+                 (.executing, .awaitingConfirmation),
                  (.executing, .idle),
                  (.executing, .resultUnknown),
                  (.completed, .idle),
@@ -518,17 +519,34 @@ public final class AppModel: ObservableObject {
                 syncBridgeStateOnInit: false
             ).withNotice("测试请求已安全完成")
         case "blocked-payment":
+            return blockedFixture(.paymentBlocked, summary: "涉及付款，Jarvis 不会代你确认或付款。")
+        case "blocked-file-deletion":
+            return blockedFixture(.fileDeletionBlocked, summary: "涉及删除文件，Jarvis 不会代你确认或删除。")
+        case "blocked-password":
+            return blockedFixture(.passwordEntryBlocked, summary: "涉及密码输入，Jarvis 不会代你输入或确认。")
+        default:
+            return AppModel(
+                phase: .offline,
+                messages: sampleMessages,
+                tasks: sampleTasks,
+                device: .offline,
+                isUITesting: true,
+                syncBridgeStateOnInit: false
+            )
+        }
+
+        func blockedFixture(_ reason: RejectionReason, summary: String) -> AppModel {
             let preview = ActionPreview(
                 requestID: "ui-blocked-1",
                 taskID: "ui-task-2",
                 title: "无法执行该操作",
-                summary: "涉及付款，Jarvis 不会代你确认或付款。",
-                action: "付款",
-                target: "支付应用",
+                summary: summary,
+                action: Self.blockedAction(for: reason),
+                target: "Jarvis 安全策略",
                 details: [
-                    .init(label: "原因", value: "付款类操作保持拒绝策略"),
+                    .init(label: "原因", value: Self.blockedDetail(for: reason)),
                 ],
-                mode: .blocked(.paymentBlocked)
+                mode: .blocked(reason)
             )
             return AppModel(
                 client: fixtureClient,
@@ -537,15 +555,6 @@ public final class AppModel: ObservableObject {
                 messages: sampleMessages,
                 tasks: sampleTasks,
                 device: connectedDevice,
-                isUITesting: true,
-                syncBridgeStateOnInit: false
-            )
-        default:
-            return AppModel(
-                phase: .offline,
-                messages: sampleMessages,
-                tasks: sampleTasks,
-                device: .offline,
                 isUITesting: true,
                 syncBridgeStateOnInit: false
             )
@@ -1230,11 +1239,37 @@ public final class AppModel: ObservableObject {
             taskID: rejection.taskID,
             title: "无法执行该操作",
             summary: summary,
-            action: "安全拒绝",
+            action: Self.blockedAction(for: rejection.reason),
             target: "Jarvis 安全策略",
             details: [.init(label: "原因", value: rejection.message)],
             mode: .blocked(rejection.reason)
         )
+    }
+
+    private static func blockedAction(for reason: RejectionReason) -> String {
+        switch reason {
+        case .paymentBlocked:
+            "付款"
+        case .fileDeletionBlocked:
+            "删除文件"
+        case .passwordEntryBlocked:
+            "输入密码"
+        default:
+            "安全拒绝"
+        }
+    }
+
+    private static func blockedDetail(for reason: RejectionReason) -> String {
+        switch reason {
+        case .paymentBlocked:
+            "付款类操作保持拒绝策略"
+        case .fileDeletionBlocked:
+            "删除文件类操作保持拒绝策略"
+        case .passwordEntryBlocked:
+            "密码输入类操作保持拒绝策略"
+        default:
+            "当前操作被安全策略拒绝"
+        }
     }
 
     private func refreshConnectionState() {
