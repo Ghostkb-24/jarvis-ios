@@ -13,6 +13,11 @@ No Codemagic run was started from this worktree. There is still no Codemagic
 build URL, XCResult artifact, JUnit artifact, simulator pass result, signed
 IPA, or TestFlight upload to claim.
 
+The CI prerequisite files and SQLite compatibility changes referenced by the
+final review are reproducible from commit `232eaf6` (`Fix bridge storage and
+iOS CI prerequisites`). The subsequent pairing/runtime integration is in
+commit `4b70dc9`.
+
 ## Files
 
 - `codemagic.yaml`
