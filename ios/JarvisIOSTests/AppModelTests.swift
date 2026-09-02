@@ -5,6 +5,37 @@ import XCTest
 
 final class AppModelTests: XCTestCase {
     @MainActor
+    func testProductionLaunchWithoutSavedBridgeIsExplicitlyUnpaired() {
+        let model = AppModel.launchConfigured(arguments: [], bridgeBootstrap: { nil })
+
+        XCTAssertFalse(model.device.isPaired)
+        XCTAssertEqual(model.device.connectionStatus, "需要配对")
+        XCTAssertFalse(model.submit(text: "不能静默丢弃"))
+        XCTAssertEqual(model.notice, "请先完成同一 Wi-Fi 配对")
+    }
+
+    @MainActor
+    func testProductionLaunchInjectsLoadedBridgeClient() async throws {
+        let client = ControllableBridgeClient(
+            initialConnectionState: .connected(
+                endpoint: .discovered(try discoveryMessage()),
+                deviceID: "saved-iphone"
+            )
+        )
+        let model = AppModel.launchConfigured(
+            arguments: [],
+            bridgeBootstrap: {
+                ConfiguredBridgeRuntime(client: client, deviceID: "saved-iphone")
+            }
+        )
+
+        let connected = await waitUntil { model.device.isConnected }
+        XCTAssertTrue(connected)
+        XCTAssertTrue(model.device.isPaired)
+        XCTAssertEqual(model.phase, .idle)
+    }
+
+    @MainActor
     func testUnpairedConnectionStateShowsPairingRequiredAndRejectsSubmissions() async throws {
         let client = ControllableBridgeClient(
             initialConnectionState: .unpaired(endpoint: .discovered(try discoveryMessage()))

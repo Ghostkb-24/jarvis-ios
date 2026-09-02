@@ -50,16 +50,10 @@ class SignedTaskConfirmation(_StrictModel):
     signature: str = Field(min_length=1)
 
 
-class PairingChallengeResponse(_StrictModel):
-    version: int
+class PairingClaimRequest(_StrictModel):
     session_id: str = Field(min_length=1)
-    bridge_id: str = Field(min_length=1)
-    pairing_code: str = Field(min_length=1)
-    challenge_nonce: str = Field(min_length=1)
-    issued_at: str = Field(min_length=1)
-    expires_at: str = Field(min_length=1)
     device_name: str = Field(min_length=1)
-    device_id: str = Field(min_length=1)
+    proof: str = Field(min_length=1)
     device_public_key: str = Field(min_length=64, max_length=64)
 
 
@@ -69,43 +63,17 @@ class LanBridgeComposition:
     pairing_session_owner: PairingSessionOwner
 
 
-@dataclass(frozen=True)
-class _PairingChallenge:
-    version: int
-    session_id: str
-    bridge_id: str
-    pairing_code: str
-    challenge_nonce: str
-    issued_at: str
-    expires_at: str
-    device_name: str
-    device_id: str
-    device_public_key: str
-    proof: str
-
-    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
-        del mode
-        return {
-            "version": self.version,
-            "session_id": self.session_id,
-            "bridge_id": self.bridge_id,
-            "pairing_code": self.pairing_code,
-            "challenge_nonce": self.challenge_nonce,
-            "issued_at": self.issued_at,
-            "expires_at": self.expires_at,
-            "device_name": self.device_name,
-            "device_id": self.device_id,
-            "device_public_key": self.device_public_key,
-        }
-
-
 class _EventBroker:
     def __init__(self) -> None:
         self._queues: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+        self._latest: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     async def publish(self, request_id: str, payload: dict[str, Any]) -> None:
         async with self._lock:
+            if request_id not in self._latest and len(self._latest) >= 1024:
+                self._latest.pop(next(iter(self._latest)))
+            self._latest[request_id] = payload
             queues = list(self._queues.get(request_id, ()))
         for queue in queues:
             await queue.put(payload)
@@ -114,6 +82,9 @@ class _EventBroker:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         async with self._lock:
             self._queues[request_id].add(queue)
+            latest = self._latest.get(request_id)
+            if latest is not None:
+                queue.put_nowait(latest)
         return queue
 
     async def unsubscribe(self, request_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
@@ -141,32 +112,7 @@ class LanBridgeAdapter:
         self._pairing_session_owner = pairing_session_owner
         self._now = now or (lambda: datetime.now(UTC))
         self._broker = _EventBroker()
-        self._pairing_challenges: dict[str, _PairingChallenge] = {}
         self._device_public_keys: dict[str, str] = {}
-
-    def current_pairing_challenge(
-        self,
-        *,
-        device_name: str,
-        device_id: str,
-        device_public_key: str,
-    ) -> _PairingChallenge:
-        session = self._pairing_session_owner.session_for_display()
-        challenge = _PairingChallenge(
-            version=1,
-            session_id=session.session_id,
-            bridge_id=session.bridge_id,
-            pairing_code=session.session_id[:6],
-            challenge_nonce=session.proof[:12],
-            issued_at=self._timestamp(self._now()),
-            expires_at=session.expires_at.isoformat().replace("+00:00", "Z"),
-            device_name=device_name,
-            device_id=device_id,
-            device_public_key=device_public_key,
-            proof=session.proof,
-        )
-        self._pairing_challenges[session.session_id] = challenge
-        return challenge
 
     def subscriber_count(self, request_id: str) -> int:
         return self._broker.subscriber_count(request_id)
@@ -174,34 +120,16 @@ class LanBridgeAdapter:
     def device_public_key_for(self, device_id: str) -> str | None:
         return self._device_public_keys.get(device_id)
 
-    def claim_pairing_challenge(self, payload: PairingChallengeResponse) -> dict[str, Any]:
-        challenge = self._pairing_challenges.get(payload.session_id)
-        if challenge is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="unknown pairing session",
-            )
-        if (
-            payload.pairing_code != challenge.pairing_code
-            or payload.challenge_nonce != challenge.challenge_nonce
-            or payload.device_id != challenge.device_id
-            or payload.device_public_key != challenge.device_public_key
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="invalid pairing challenge",
-            )
+    def claim_pairing(self, payload: PairingClaimRequest) -> dict[str, Any]:
         try:
             device = self.service.claim_pairing(
                 payload.session_id,
                 payload.device_name,
-                challenge.proof,
+                payload.proof,
             )
         except PairingClaimError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-        finally:
-            self._pairing_challenges.pop(payload.session_id, None)
-        self._device_public_keys[device.device_id] = challenge.device_public_key
+        self._device_public_keys[device.device_id] = payload.device_public_key
         return {
             "version": 1,
             "device_id": device.device_id,
@@ -279,7 +207,10 @@ class LanBridgeAdapter:
                 not in {"completed", "failed", "cancelled", "result_unknown"}
                 and "reason" not in current
             ):
-                current = await queue.get()
+                next_event = await queue.get()
+                if next_event == current:
+                    continue
+                current = next_event
                 yield current
         finally:
             await self._broker.unsubscribe(request_id, queue)
@@ -448,9 +379,9 @@ def create_lan_bridge_app(adapter: LanBridgeAdapter) -> FastAPI:
     app = FastAPI(title="Jarvis LAN Bridge", version="1")
     app.state.adapter = adapter
 
-    @app.post("/v1/pair/challenge", status_code=status.HTTP_201_CREATED)
-    async def claim_pairing_challenge(response: PairingChallengeResponse) -> dict[str, Any]:
-        return adapter.claim_pairing_challenge(response)
+    @app.post("/v1/pair/claim", status_code=status.HTTP_201_CREATED)
+    async def claim_pairing(request: PairingClaimRequest) -> dict[str, Any]:
+        return adapter.claim_pairing(request)
 
     @app.post("/v1/requests")
     async def submit_request(envelope: SignedBridgeRequest) -> JSONResponse:

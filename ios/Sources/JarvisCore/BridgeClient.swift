@@ -355,7 +355,8 @@ public struct BridgeClient: Sendable {
         deviceName: String,
         store: KeychainDeviceStore,
         transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory(),
-        now: Date = Date()
+        now: Date = Date(),
+        devicePublicKey: String? = nil
     ) async throws -> DeviceCredentials {
         guard !deviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeProtocolError.emptyField("device_name")
@@ -375,10 +376,13 @@ public struct BridgeClient: Sendable {
         let transport = try transportFactory.makeTransport(
             certificateFingerprint: manualEndpoint.certificateFingerprint
         )
+        let publicKey = try devicePublicKey ?? generatedDevicePublicKey()
+        try ProtocolValidation.validatePublicKey(publicKey)
         let body = PairClaimRequest(
             sessionID: payload.sessionID,
             deviceName: deviceName.trimmingCharacters(in: .whitespacesAndNewlines),
-            proof: payload.proof
+            proof: payload.proof,
+            devicePublicKey: publicKey
         )
         var request = URLRequest(
             url: Self.endpoint(baseURL: baseURL, components: ["v1", "pair", "claim"])
@@ -390,8 +394,7 @@ public struct BridgeClient: Sendable {
             request: request,
             transport: transport,
             store: store,
-            expectedDeviceID: payload.deviceID,
-            expectedDevicePublicKey: payload.devicePublicKey
+            expectedDevicePublicKey: publicKey
         )
     }
 
@@ -406,6 +409,12 @@ public struct BridgeClient: Sendable {
         try challenge.validateFreshness(now: now)
         try response.validateFreshness(now: now)
         guard challenge.sessionID == response.sessionID else {
+            throw BridgeError.invalidPairingResponse
+        }
+        guard challenge.bridgeID == response.bridgeID else {
+            throw BridgeError.invalidPairingResponse
+        }
+        guard challenge.expiresAt == response.expiresAt else {
             throw BridgeError.invalidPairingResponse
         }
         guard challenge.pairingCode == response.pairingCode else {
@@ -424,16 +433,22 @@ public struct BridgeClient: Sendable {
             certificateFingerprint: endpoint.certificateFingerprint
         )
         var request = URLRequest(
-            url: Self.endpoint(baseURL: baseURL, components: ["v1", "pair", "challenge"])
+            url: Self.endpoint(baseURL: baseURL, components: ["v1", "pair", "claim"])
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(response)
+        request.httpBody = try JSONEncoder().encode(
+            PairClaimRequest(
+                sessionID: response.sessionID,
+                deviceName: response.deviceName,
+                proof: response.proof,
+                devicePublicKey: response.devicePublicKey
+            )
+        )
         return try await claimCredentials(
             request: request,
             transport: transport,
             store: store,
-            expectedDeviceID: response.deviceID,
             expectedDevicePublicKey: response.devicePublicKey
         )
     }
@@ -731,7 +746,6 @@ public struct BridgeClient: Sendable {
         request: URLRequest,
         transport: any BridgeTransport,
         store: KeychainDeviceStore,
-        expectedDeviceID: String,
         expectedDevicePublicKey: String
     ) async throws -> DeviceCredentials {
         let data: Data
@@ -752,7 +766,6 @@ public struct BridgeClient: Sendable {
         }
         let credentials = try decodePairClaimResponse(
             data,
-            expectedDeviceID: expectedDeviceID,
             expectedDevicePublicKey: expectedDevicePublicKey
         )
         try store.save(credentials)
@@ -761,7 +774,6 @@ public struct BridgeClient: Sendable {
 
     private static func decodePairClaimResponse(
         _ data: Data,
-        expectedDeviceID: String,
         expectedDevicePublicKey: String
     ) throws -> DeviceCredentials {
         let decoded: PairClaimResponse
@@ -773,7 +785,6 @@ public struct BridgeClient: Sendable {
         guard
             decoded.version == 1,
             !decoded.deviceID.isEmpty,
-            decoded.deviceID == expectedDeviceID,
             decoded.devicePublicKey == expectedDevicePublicKey,
             let secret = decodeURLSafeBase64(decoded.deviceSecret),
             secret.count == 32
@@ -796,6 +807,12 @@ public struct BridgeClient: Sendable {
             normalized += String(repeating: "=", count: 4 - remainder)
         }
         return Data(base64Encoded: normalized)
+    }
+
+    private static func generatedDevicePublicKey() throws -> String {
+        Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private static func isAmbiguousTransportError(_ error: Error) -> Bool {
@@ -836,11 +853,13 @@ private struct PairClaimRequest: Encodable {
     let sessionID: String
     let deviceName: String
     let proof: String
+    let devicePublicKey: String
 
     private enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
         case deviceName = "device_name"
         case proof
+        case devicePublicKey = "device_public_key"
     }
 }
 

@@ -48,21 +48,18 @@ final class BridgeModelsTests: XCTestCase {
         XCTAssertEqual(decoded, challenge)
     }
 
-    func testPairingPayloadCarriesPersistentDeviceIdentityAndKeyBinding() throws {
-        let payload = try PairingPayload(
-            version: 1,
-            bridgeID: "bridge-1",
-            bridgeURL: "https://192.168.1.20:8443",
-            certificateFingerprint: String(repeating: "ab", count: 32),
-            sessionID: "session-1",
-            expiresAt: "2026-09-01T09:05:00Z",
-            proof: "proof",
-            deviceID: "iphone-1",
-            devicePublicKey: String(repeating: "cd", count: 32)
+    func testPairingPayloadDecodesDesktopQRFixture() throws {
+        let fixtureURL = try XCTUnwrap(
+            Bundle.module.url(forResource: "pairing-payload", withExtension: "json")
+        )
+        let payload = try JSONDecoder().decode(
+            PairingPayload.self,
+            from: Data(contentsOf: fixtureURL)
         )
 
-        XCTAssertEqual(payload.deviceID, "iphone-1")
-        XCTAssertEqual(payload.devicePublicKey, String(repeating: "cd", count: 32))
+        XCTAssertEqual(payload.bridgeID, "jarvis-desktop")
+        XCTAssertEqual(payload.sessionID, "session-1")
+        XCTAssertEqual(payload.proof, "pairing-proof")
     }
 
     func testPairingChallengeResponseRejectsUnknownFields() {
@@ -80,12 +77,15 @@ final class BridgeModelsTests: XCTestCase {
         let response = try PairingChallengeResponse(
             version: 1,
             sessionID: "session-1",
+            bridgeID: "bridge-1",
             deviceName: "iPhone",
             deviceID: "iphone-1",
             devicePublicKey: String(repeating: "cd", count: 32),
             pairingCode: "493821",
             challengeNonce: "nonce-1",
-            issuedAt: "2026-09-01T09:00:00Z"
+            issuedAt: "2026-09-01T09:00:00Z",
+            expiresAt: "2026-09-01T09:05:00Z",
+            proof: "pairing-proof"
         )
 
         XCTAssertEqual(response.deviceID, "iphone-1")
@@ -160,12 +160,15 @@ final class BridgeModelsTests: XCTestCase {
         let response = try PairingChallengeResponse(
             version: 1,
             sessionID: "session-1",
+            bridgeID: "bridge-1",
             deviceName: "iPhone",
             deviceID: "iphone-1",
             devicePublicKey: String(repeating: "cd", count: 32),
             pairingCode: "493821",
             challengeNonce: "nonce-1",
-            issuedAt: "2026-09-01T08:40:00Z"
+            issuedAt: "2026-09-01T08:40:00Z",
+            expiresAt: "2026-09-01T08:45:00Z",
+            proof: "pairing-proof"
         )
 
         XCTAssertThrowsError(
@@ -416,7 +419,7 @@ final class BridgeModelsTests: XCTestCase {
 
     func testPairingPayloadRejectsUnknownTopLevelFields() {
         let fingerprint = String(repeating: "ab", count: 32)
-        let data = Data(#"{"version":1,"bridge_id":"bridge-1","bridge_url":"https://192.168.1.20:8443","certificate_sha256":"\#(fingerprint)","session_id":"session-1","expires_at":"2026-08-28T00:02:00+00:00","proof":"proof","device_id":"iphone-1","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","unexpected":true}"#.utf8)
+        let data = Data(#"{"version":1,"bridge_id":"bridge-1","bridge_url":"https://192.168.1.20:8443","certificate_sha256":"\#(fingerprint)","session_id":"session-1","expires_at":"2026-08-28T00:02:00+00:00","proof":"proof","unexpected":true}"#.utf8)
 
         XCTAssertThrowsError(try JSONDecoder().decode(PairingPayload.self, from: data)) { error in
             XCTAssertEqual(

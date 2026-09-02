@@ -34,7 +34,7 @@ private struct RootTabView: View {
                 }
                 .tag(AppTab.tasks)
 
-            DeviceView(device: model.device)
+            DeviceView(model: model)
                 .tabItem {
                     Label("设备", systemImage: "desktopcomputer")
                 }

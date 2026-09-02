@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
 from jarvis_assistant.bridge.auth import sign_confirmation, sign_request
 from jarvis_assistant.bridge.device_store import DeviceStore
 from jarvis_assistant.bridge.idempotency import IdempotencyLedger
-from jarvis_assistant.bridge.pairing import PairedDevice, PairingSessionOwner
+from jarvis_assistant.bridge.pairing import PairedDevice, PairingSession, PairingSessionOwner
 from jarvis_assistant.bridge.protocol import BridgeRequest, TaskConfirmation
 from jarvis_assistant.bridge.service import BridgeService
 from jarvis_assistant.lan_bridge import LanBridgeAdapter, create_lan_bridge_app
@@ -19,6 +22,14 @@ from jarvis_assistant.tools import default_registry
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
 SECRET = b"0123456789abcdef0123456789abcdef"
+PAIRING_FIXTURE = (
+    Path(__file__).parents[1]
+    / "ios"
+    / "Tests"
+    / "JarvisProtocolTests"
+    / "Fixtures"
+    / "pairing-payload.json"
+)
 
 
 class MemoryCredentialBackend:
@@ -161,23 +172,44 @@ def approval(request_id: str, confirmation_request: BridgeRequest) -> TaskConfir
     )
 
 
-def test_pairing_challenge_returns_persisted_identity_and_subsequent_auth_uses_it(
+def test_desktop_qr_payload_matches_ios_protocol_fixture() -> None:
+    expected = json.loads(PAIRING_FIXTURE.read_text(encoding="utf-8"))
+    session = PairingSession(
+        bridge_id=expected["bridge_id"],
+        bridge_url=expected["bridge_url"],
+        certificate_sha256=expected["certificate_sha256"],
+        session_id=expected["session_id"],
+        expires_at=datetime.fromisoformat(expected["expires_at"].replace("Z", "+00:00")),
+        proof=expected["proof"],
+    )
+
+    assert session.qr_payload == {
+        **expected,
+        "expires_at": "2099-09-02T12:02:00+00:00",
+    }
+
+
+def test_pairing_claim_returns_persisted_identity_and_subsequent_auth_uses_it(
     tmp_path: Path,
 ) -> None:
     adapter, volume, _, devices = make_adapter(tmp_path)
     app = create_lan_bridge_app(adapter)
-    challenge = adapter.current_pairing_challenge(
-        device_name="Alice's iPhone",
-        device_id="client-supplied-id",
-        device_public_key="cd" * 32,
-    )
+    pairing = adapter._pairing_session_owner.session_for_display()  # noqa: SLF001
 
     with TestClient(app) as client:
-        response = client.post("/v1/pair/challenge", json=challenge.model_dump(mode="json"))
+        response = client.post(
+            "/v1/pair/claim",
+            json={
+                "session_id": pairing.session_id,
+                "device_name": "Alice's iPhone",
+                "proof": pairing.proof,
+                "device_public_key": "cd" * 32,
+            },
+        )
 
     assert response.status_code == status.HTTP_201_CREATED
     persisted_device_id = response.json()["device_id"]
-    assert persisted_device_id != "client-supplied-id"
+    assert persisted_device_id
     assert devices.get_device(persisted_device_id) is not None
     assert response.json()["device_public_key"] == "cd" * 32
     assert adapter.device_public_key_for(persisted_device_id) == "cd" * 32
@@ -202,6 +234,26 @@ def test_pairing_challenge_returns_persisted_identity_and_subsequent_auth_uses_i
 
     assert submit.status_code == status.HTTP_200_OK
     assert volume.set_values == [55]
+
+
+def test_pairing_claim_rejects_legacy_challenge_route_and_extra_fields(tmp_path: Path) -> None:
+    adapter, _, _, _ = make_adapter(tmp_path)
+    app = create_lan_bridge_app(adapter)
+    pairing = adapter._pairing_session_owner.session_for_display()  # noqa: SLF001
+    claim = {
+        "session_id": pairing.session_id,
+        "device_name": "Alice's iPhone",
+        "proof": pairing.proof,
+        "device_public_key": "cd" * 32,
+    }
+
+    with TestClient(app) as client:
+        legacy = client.post("/v1/pair/challenge", json=claim)
+        claim["device_id"] = "client-selected-id"
+        extra_field = client.post("/v1/pair/claim", json=claim)
+
+    assert legacy.status_code == status.HTTP_404_NOT_FOUND
+    assert extra_field.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def test_requests_reject_invalid_signature(tmp_path: Path) -> None:
@@ -230,6 +282,26 @@ def test_duplicate_low_risk_submission_returns_same_terminal_event(tmp_path: Pat
     assert first.json() == second.json()
     assert first.json()["state"] == "completed"
     assert volume.set_values == [35]
+
+
+@pytest.mark.asyncio
+async def test_event_broker_replays_terminal_event_published_before_subscribe(
+    tmp_path: Path,
+) -> None:
+    adapter, _, _, _ = make_adapter(tmp_path)
+    terminal = {
+        "version": 1,
+        "request_id": "race-1",
+        "task_id": "race-1",
+        "state": "completed",
+        "summary": "done",
+        "output": {},
+    }
+
+    await adapter._broker.publish("race-1", terminal)  # noqa: SLF001
+    queue = await adapter._broker.subscribe("race-1")  # noqa: SLF001
+
+    assert await asyncio.wait_for(queue.get(), timeout=0.1) == terminal
 
 
 def test_confirmation_and_websocket_stream_deliver_preview_then_terminal(tmp_path: Path) -> None:

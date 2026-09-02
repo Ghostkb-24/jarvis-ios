@@ -13,6 +13,11 @@ protocol JarvisBridgeClient: Sendable {
 
 extension BridgeClient: JarvisBridgeClient {}
 
+struct ConfiguredBridgeRuntime {
+    let client: any JarvisBridgeClient
+    let deviceID: String
+}
+
 struct ActionPreview: Identifiable, Equatable, Sendable {
     enum Mode: Equatable, Sendable {
         case approval
@@ -332,13 +337,17 @@ public final class AppModel: ObservableObject {
     @Published private(set) var testingClientCallCount = 0
     @Published private(set) var speechPermissionStatus: SpeechPermissionStatus = .undetermined
     @Published private(set) var isRequestingSpeechPermission = false
+    @Published var pairingPayloadText = ""
+    @Published private(set) var isPairing = false
 
     let isUITesting: Bool
 
-    private let client: (any JarvisBridgeClient)?
-    private let deviceID: String
+    private var client: (any JarvisBridgeClient)?
+    private var deviceID: String
     private let speechSession: SpeechSession?
     private let widgetSnapshotWriter: (any WidgetSnapshotWriting)?
+    private let pairingStore: KeychainDeviceStore
+    private let bridgeDefaults: UserDefaults
     private var operationGeneration: UInt64 = 0
     private var activeGeneration: UInt64?
     private var voiceGeneration: UInt64 = 0
@@ -354,6 +363,8 @@ public final class AppModel: ObservableObject {
         isUITesting: Bool = false,
         speechSession: SpeechSession? = nil,
         widgetSnapshotWriter: (any WidgetSnapshotWriting)? = nil,
+        pairingStore: KeychainDeviceStore = KeychainDeviceStore(),
+        bridgeDefaults: UserDefaults = .standard,
         syncBridgeStateOnInit: Bool = true
     ) {
         self.client = client
@@ -365,6 +376,8 @@ public final class AppModel: ObservableObject {
         self.isUITesting = isUITesting
         self.speechSession = speechSession
         self.widgetSnapshotWriter = widgetSnapshotWriter
+        self.pairingStore = pairingStore
+        self.bridgeDefaults = bridgeDefaults
         speechPermissionStatus = speechSession?.permissionStatus ?? .undetermined
         widgetSnapshotWriter?.save(device)
         if syncBridgeStateOnInit {
@@ -398,10 +411,17 @@ public final class AppModel: ObservableObject {
         return preview
     }
 
-    static func launchConfigured(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppModel {
+    static func launchConfigured(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        bridgeBootstrap: () -> ConfiguredBridgeRuntime? = loadConfiguredBridge
+    ) -> AppModel {
         let isUITesting = arguments.contains("-ui-testing")
         guard isUITesting else {
+            let runtime = bridgeBootstrap()
             return AppModel(
+                client: runtime?.client,
+                deviceID: runtime?.deviceID ?? "unpaired-iphone",
+                device: runtime == nil ? .unpaired : .offline,
                 speechSession: SpeechSession(),
                 widgetSnapshotWriter: AppGroupWidgetSnapshotWriter()
             )
@@ -558,6 +578,56 @@ public final class AppModel: ObservableObject {
                 isUITesting: true,
                 syncBridgeStateOnInit: false
             )
+        }
+    }
+
+    func pairEnteredPayload() {
+        let normalized = pairingPayloadText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, !isPairing else { return }
+        guard
+            let data = normalized.data(using: .utf8),
+            let payload = try? JSONDecoder().decode(PairingPayload.self, from: data)
+        else {
+            notice = "配对内容无效，请重新扫描或粘贴完整二维码内容"
+            return
+        }
+
+        isPairing = true
+        notice = "正在验证电脑身份并完成配对"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let credentials = try await BridgeClient.claimPairing(
+                    payload,
+                    deviceName: "Jarvis iPhone",
+                    store: pairingStore
+                )
+                guard let baseURL = URL(string: payload.bridgeURL) else {
+                    throw BridgeError.invalidBridgeURL
+                }
+                let endpoint = BridgeEndpoint.manual(
+                    baseURL: baseURL,
+                    certificateFingerprint: payload.certificateFingerprint
+                )
+                let configuredClient = try BridgeClient(
+                    endpoint: endpoint,
+                    credentials: credentials
+                )
+                Self.save(
+                    baseURL: baseURL,
+                    certificateFingerprint: payload.certificateFingerprint,
+                    defaults: bridgeDefaults
+                )
+                client = configuredClient
+                deviceID = credentials.deviceID
+                pairingPayloadText = ""
+                isPairing = false
+                notice = "配对完成"
+                apply(connectionState: await configuredClient.connectionState())
+            } catch {
+                isPairing = false
+                notice = "配对失败，请在 Windows 端刷新二维码后重试"
+            }
         }
     }
 
@@ -1429,6 +1499,41 @@ public final class AppModel: ObservableObject {
         let valueIndex = arguments.index(after: flagIndex)
         guard arguments.indices.contains(valueIndex) else { return "offline" }
         return arguments[valueIndex]
+    }
+
+    private static func loadConfiguredBridge() -> ConfiguredBridgeRuntime? {
+        let defaults = UserDefaults.standard
+        guard
+            let rawURL = defaults.string(forKey: "jarvis.bridge.url"),
+            let baseURL = URL(string: rawURL),
+            let fingerprint = defaults.string(forKey: "jarvis.bridge.certificate_sha256")
+        else {
+            return nil
+        }
+        let store = KeychainDeviceStore()
+        guard
+            let credentials = try? store.load(),
+            let client = try? BridgeClient(
+                baseURL: baseURL,
+                certificateFingerprint: fingerprint,
+                credentials: credentials
+            )
+        else {
+            return nil
+        }
+        return ConfiguredBridgeRuntime(client: client, deviceID: credentials.deviceID)
+    }
+
+    private static func save(
+        baseURL: URL,
+        certificateFingerprint: String,
+        defaults: UserDefaults
+    ) {
+        defaults.set(baseURL.absoluteString, forKey: "jarvis.bridge.url")
+        defaults.set(
+            certificateFingerprint,
+            forKey: "jarvis.bridge.certificate_sha256"
+        )
     }
 }
 

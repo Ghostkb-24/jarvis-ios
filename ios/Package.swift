@@ -27,7 +27,8 @@ let package = Package(
         ),
         .testTarget(
             name: "JarvisProtocolTests",
-            dependencies: ["JarvisProtocol"]
+            dependencies: ["JarvisProtocol"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "JarvisCoreTests",

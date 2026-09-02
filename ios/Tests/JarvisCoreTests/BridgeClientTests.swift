@@ -216,6 +216,20 @@ final class BridgeClientTests: XCTestCase {
         XCTAssertEqual(credentials, try store.load())
         XCTAssertEqual(security.addedItems.count, 2)
         XCTAssertEqual(await transport.requestCount(), 1)
+        let sent = try XCTUnwrap((await transport.recordedRequests()).first)
+        XCTAssertEqual(sent.url?.path, "/v1/pair/claim")
+        let claim = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(sent.httpBody)) as? [String: String]
+        )
+        XCTAssertEqual(
+            claim,
+            [
+                "session_id": "session-1",
+                "device_name": "Alice's iPhone",
+                "proof": "pairing-proof",
+                "device_public_key": String(repeating: "cd", count: 32),
+            ]
+        )
     }
 
     func testPairingRejectsStaleChallengeBeforePersistingOrSending() async throws {
@@ -242,7 +256,7 @@ final class BridgeClientTests: XCTestCase {
         XCTAssertEqual(await transport.requestCount(), 0)
     }
 
-    func testPairingRejectsReturnedCredentialDeviceMismatchBeforePersisting() async throws {
+    func testPairingAcceptsServerIssuedDeviceIdentity() async throws {
         let security = FakeSecurityItemAccess()
         let store = KeychainDeviceStore(service: "test.jarvis", security: security)
         let body = Data(#"{"version":1,"device_id":"other-device","device_public_key":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","device_secret":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}"#.utf8)
@@ -250,21 +264,17 @@ final class BridgeClientTests: XCTestCase {
             .success((body, try httpResponse(status: 201))),
         ])
 
-        do {
-            _ = try await BridgeClient.completePairing(
-                challenge: try makePairingChallenge(),
-                response: try makePairingChallengeResponse(),
-                endpoint: .discovered(try makeDiscoveryMessage()),
-                store: store,
-                now: try freshNow(),
-                transportFactory: RecordingPinnedTransportFactory(transport: transport)
-            )
-            XCTFail("Mismatched returned device IDs must be rejected")
-        } catch {
-            XCTAssertEqual(error as? BridgeError, .invalidPairingResponse)
-        }
-        XCTAssertNil(try store.load())
-        XCTAssertTrue(security.addedItems.isEmpty)
+        let credentials = try await BridgeClient.completePairing(
+            challenge: try makePairingChallenge(),
+            response: try makePairingChallengeResponse(),
+            endpoint: .discovered(try makeDiscoveryMessage()),
+            store: store,
+            now: try freshNow(),
+            transportFactory: RecordingPinnedTransportFactory(transport: transport)
+        )
+
+        XCTAssertEqual(credentials.deviceID, "other-device")
+        XCTAssertEqual(credentials, try store.load())
     }
 
     func testPairingRejectsReturnedCredentialPublicKeyMismatchBeforePersisting() async throws {
@@ -604,12 +614,15 @@ private extension BridgeClientTests {
         try PairingChallengeResponse(
             version: 1,
             sessionID: "session-1",
+            bridgeID: "bridge-1",
             deviceName: "Alice's iPhone",
             deviceID: "iphone-1",
             devicePublicKey: String(repeating: "cd", count: 32),
             pairingCode: "123456",
             challengeNonce: "nonce-1",
-            issuedAt: "2026-09-01T00:00:10Z"
+            issuedAt: "2026-09-01T00:00:10Z",
+            expiresAt: "2026-09-01T00:02:00Z",
+            proof: "pairing-proof"
         )
     }
 

@@ -34,6 +34,9 @@ def make_session() -> PairingSession:
         "https://0x08080808:8443",
         "https://example.com:8443",
         "https://user:password@192.168.1.20:8443",
+        "https://192.168.1.20:8443/api",
+        "https://192.168.1.20:8443?next=https://8.8.8.8",
+        "https://192.168.1.20:8443#fragment",
     ],
 )
 def test_create_rejects_non_https_or_non_private_bridge_url(bridge_url: str) -> None:

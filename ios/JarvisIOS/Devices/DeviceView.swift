@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct DeviceView: View {
-    let device: DeviceSnapshot
+    @ObservedObject var model: AppModel
+
+    private var device: DeviceSnapshot { model.device }
 
     var body: some View {
         NavigationStack {
@@ -71,6 +73,40 @@ struct DeviceView: View {
                 value: device.networkStatus,
                 color: device.isConnected ? JarvisTheme.connected : JarvisTheme.warning
             )
+
+            if !device.isPaired {
+                Divider().overlay(Color.white.opacity(0.10))
+                Text("在 Windows Jarvis 中显示配对二维码，然后扫描或粘贴二维码的 JSON 内容。")
+                    .font(.subheadline)
+                    .foregroundStyle(JarvisTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextField(
+                    "粘贴配对二维码内容",
+                    text: $model.pairingPayloadText,
+                    axis: .vertical
+                )
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(12)
+                .background(JarvisTheme.emphasizedSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityIdentifier("device.pairing.payload")
+                Button(action: model.pairEnteredPayload) {
+                    Label(
+                        model.isPairing ? "正在配对" : "开始安全配对",
+                        systemImage: "qrcode.viewfinder"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    model.isPairing
+                        || model.pairingPayloadText
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                )
+                .accessibilityIdentifier("device.pairing.submit")
+            }
         }
         .jarvisCard()
     }

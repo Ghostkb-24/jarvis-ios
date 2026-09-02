@@ -405,8 +405,6 @@ public struct PairingPayload: Codable, Equatable, Sendable {
     public let sessionID: String
     public let expiresAt: String
     public let proof: String
-    public let deviceID: String
-    public let devicePublicKey: String
 
     public init(
         version: Int,
@@ -415,9 +413,7 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         certificateFingerprint: String,
         sessionID: String,
         expiresAt: String,
-        proof: String,
-        deviceID: String,
-        devicePublicKey: String
+        proof: String
     ) throws {
         try validateVersion(version)
         for (value, field) in [
@@ -426,12 +422,10 @@ public struct PairingPayload: Codable, Equatable, Sendable {
             (sessionID, "session_id"),
             (expiresAt, "expires_at"),
             (proof, "proof"),
-            (deviceID, "device_id"),
         ] {
             guard !value.isEmpty else { throw BridgeProtocolError.emptyField(field) }
         }
         try ProtocolValidation.validateFingerprint(certificateFingerprint)
-        try ProtocolValidation.validatePublicKey(devicePublicKey)
         self.version = version
         self.bridgeID = bridgeID
         self.bridgeURL = bridgeURL
@@ -439,8 +433,6 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         self.sessionID = sessionID
         self.expiresAt = expiresAt
         self.proof = proof
-        self.deviceID = deviceID
-        self.devicePublicKey = devicePublicKey
     }
 
     public init(from decoder: Decoder) throws {
@@ -449,7 +441,7 @@ public struct PairingPayload: Codable, Equatable, Sendable {
             type: "PairingPayload",
             allowed: [
                 "version", "bridge_id", "bridge_url", "certificate_sha256",
-                "session_id", "expires_at", "proof", "device_id", "device_public_key",
+                "session_id", "expires_at", "proof",
             ]
         )
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -460,9 +452,7 @@ public struct PairingPayload: Codable, Equatable, Sendable {
             certificateFingerprint: container.decode(String.self, forKey: .certificateFingerprint),
             sessionID: container.decode(String.self, forKey: .sessionID),
             expiresAt: container.decode(String.self, forKey: .expiresAt),
-            proof: container.decode(String.self, forKey: .proof),
-            deviceID: container.decode(String.self, forKey: .deviceID),
-            devicePublicKey: container.decode(String.self, forKey: .devicePublicKey)
+            proof: container.decode(String.self, forKey: .proof)
         )
     }
 
@@ -474,8 +464,6 @@ public struct PairingPayload: Codable, Equatable, Sendable {
         case sessionID = "session_id"
         case expiresAt = "expires_at"
         case proof
-        case deviceID = "device_id"
-        case devicePublicKey = "device_public_key"
     }
 }
 
@@ -571,39 +559,51 @@ public struct PairingChallenge: Codable, Equatable, Sendable {
 public struct PairingChallengeResponse: Codable, Equatable, Sendable {
     public let version: Int
     public let sessionID: String
+    public let bridgeID: String
     public let deviceName: String
     public let deviceID: String
     public let devicePublicKey: String
     public let pairingCode: String
     public let challengeNonce: String
     public let issuedAt: String
+    public let expiresAt: String
+    public let proof: String
 
     public init(
         version: Int,
         sessionID: String,
+        bridgeID: String,
         deviceName: String,
         deviceID: String,
         devicePublicKey: String,
         pairingCode: String,
         challengeNonce: String,
-        issuedAt: String
+        issuedAt: String,
+        expiresAt: String,
+        proof: String
     ) throws {
         try validateVersion(version)
         try requireNonempty(sessionID, field: "session_id")
+        try requireNonempty(bridgeID, field: "bridge_id")
         try requireNonempty(deviceName, field: "device_name")
         try requireNonempty(deviceID, field: "device_id")
         try requireNonempty(pairingCode, field: "pairing_code")
         try requireNonempty(challengeNonce, field: "challenge_nonce")
         _ = try ProtocolValidation.parseTimestamp(issuedAt, field: "issued_at")
+        _ = try ProtocolValidation.parseTimestamp(expiresAt, field: "expires_at")
+        try requireNonempty(proof, field: "proof")
         try ProtocolValidation.validatePublicKey(devicePublicKey)
         self.version = version
         self.sessionID = sessionID
+        self.bridgeID = bridgeID
         self.deviceName = deviceName
         self.deviceID = deviceID
         self.devicePublicKey = devicePublicKey
         self.pairingCode = pairingCode
         self.challengeNonce = challengeNonce
         self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+        self.proof = proof
     }
 
     public init(from decoder: Decoder) throws {
@@ -613,24 +613,30 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
             allowed: [
                 "version",
                 "session_id",
+                "bridge_id",
                 "device_name",
                 "device_id",
                 "device_public_key",
                 "pairing_code",
                 "challenge_nonce",
                 "issued_at",
+                "expires_at",
+                "proof",
             ]
         )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             version: container.decode(Int.self, forKey: .version),
             sessionID: container.decode(String.self, forKey: .sessionID),
+            bridgeID: container.decode(String.self, forKey: .bridgeID),
             deviceName: container.decode(String.self, forKey: .deviceName),
             deviceID: container.decode(String.self, forKey: .deviceID),
             devicePublicKey: container.decode(String.self, forKey: .devicePublicKey),
             pairingCode: container.decode(String.self, forKey: .pairingCode),
             challengeNonce: container.decode(String.self, forKey: .challengeNonce),
-            issuedAt: container.decode(String.self, forKey: .issuedAt)
+            issuedAt: container.decode(String.self, forKey: .issuedAt),
+            expiresAt: container.decode(String.self, forKey: .expiresAt),
+            proof: container.decode(String.self, forKey: .proof)
         )
     }
 
@@ -646,17 +652,24 @@ public struct PairingChallengeResponse: Codable, Equatable, Sendable {
             maxAge: maxAge,
             maxFutureSkew: maxFutureSkew
         )
+        let expiry = try ProtocolValidation.parseTimestamp(expiresAt, field: "expires_at")
+        guard expiry.timeIntervalSince(now) >= -maxFutureSkew else {
+            throw BridgeProtocolError.staleMessage(field: "expires_at")
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
         case version
         case sessionID = "session_id"
+        case bridgeID = "bridge_id"
         case deviceName = "device_name"
         case deviceID = "device_id"
         case devicePublicKey = "device_public_key"
         case pairingCode = "pairing_code"
         case challengeNonce = "challenge_nonce"
         case issuedAt = "issued_at"
+        case expiresAt = "expires_at"
+        case proof
     }
 }
 

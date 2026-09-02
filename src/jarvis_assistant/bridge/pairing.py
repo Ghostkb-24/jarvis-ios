@@ -207,13 +207,16 @@ def _validate_bridge_url(value: str) -> str:
         or host is None
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
         or not is_private_bridge_host(host)
     ):
         raise ValueError("bridge URL must be a private HTTPS URL")
     canonical_host = canonicalize_bridge_host(host)
     url_host = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
     netloc = f"{url_host}:{port}" if port is not None else url_host
-    return parsed._replace(netloc=netloc).geturl()
+    return parsed._replace(netloc=netloc, path="").geturl()
 
 
 def _is_lowercase_sha256(value: object) -> bool:

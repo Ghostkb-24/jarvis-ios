@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "bridge_id": "jarvis-desktop",
+  "bridge_url": "https://192.168.1.20:8443",
+  "certificate_sha256": "abababababababababababababababababababababababababababababababab",
+  "session_id": "session-1",
+  "expires_at": "2099-09-02T12:02:00Z",
+  "proof": "pairing-proof"
+}
