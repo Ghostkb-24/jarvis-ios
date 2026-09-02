@@ -69,6 +69,25 @@ final class AppModelTests: XCTestCase {
     }
 
     @MainActor
+    func testPairedConnectionStateIsReadyForFirstAuthenticatedRequest() async throws {
+        let client = ControllableBridgeClient(
+            initialConnectionState: .paired(
+                endpoint: .discovered(try discoveryMessage()),
+                deviceID: "saved-iphone"
+            )
+        )
+        let model = makeModel(client: client, phase: .offline, device: .offline)
+
+        let synced = await waitUntil {
+            model.device.isPaired && model.device.isConnected && model.phase == .idle
+        }
+        XCTAssertTrue(synced)
+        XCTAssertEqual(model.device.connectionStatus, "已配对，等待请求连接")
+        XCTAssertTrue(model.submit(text: "首次认证请求"))
+        XCTAssertTrue(await waitForSubmitCount(1, client: client))
+    }
+
+    @MainActor
     func testSubmitTextUsesBridgeChatRequestAndAppliesItsResponse() async throws {
         let client = ControllableBridgeClient()
         let model = makeModel(client: client)

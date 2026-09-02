@@ -1369,17 +1369,20 @@ public final class AppModel: ObservableObject {
             )
             nextPhase = .offline
         case let .paired(endpoint, _):
+            // A paired client is usable for the first authenticated request. The
+            // BridgeClient transitions to .connecting/.connected when that request
+            // is sent, so do not gate the initial request behind isConnected.
             snapshot = DeviceSnapshot(
                 computerName: displayName(for: endpoint),
-                isConnected: false,
+                isConnected: true,
                 isPaired: true,
                 isCertificatePinned: true,
-                connectionStatus: "电脑离线",
+                connectionStatus: "已配对，等待请求连接",
                 pairingStatus: "已配对",
-                modelStatus: "等待重新连接",
+                modelStatus: "等待首次请求校验",
                 networkStatus: "同一 Wi-Fi · 已保存凭据"
             )
-            nextPhase = .offline
+            nextPhase = .idle
         case let .connecting(endpoint, _):
             snapshot = DeviceSnapshot(
                 computerName: displayName(for: endpoint),
