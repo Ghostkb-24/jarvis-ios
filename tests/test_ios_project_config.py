@@ -26,3 +26,9 @@ def test_jarvis_app_info_contains_scene_and_voice_privacy_configuration() -> Non
     assert "@Environment(\\.scenePhase)" in app_entry
     assert ".onChange(of: scenePhase)" in app_entry
     assert "model.appWillResignActive()" in app_entry
+
+
+def test_ios_test_targets_have_explicit_product_names_for_xcodegen_schemes() -> None:
+    project = PROJECT_YML.read_text(encoding="utf-8")
+    assert "PRODUCT_NAME: JarvisIOSTests" in project
+    assert "PRODUCT_NAME: JarvisIOSUITests" in project
