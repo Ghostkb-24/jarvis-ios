@@ -107,7 +107,7 @@ schemes:
     test:
       config: Debug
       targets:
-        - name: JarvisIOSTests
+        - target: JarvisIOSTests
           parallelizable: false
-        - name: JarvisIOSUITests
+        - target: JarvisIOSUITests
           parallelizable: false

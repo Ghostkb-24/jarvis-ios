@@ -32,3 +32,11 @@ def test_ios_test_targets_have_explicit_product_names_for_xcodegen_schemes() -> 
     project = PROJECT_YML.read_text(encoding="utf-8")
     assert "PRODUCT_NAME: JarvisIOSTests" in project
     assert "PRODUCT_NAME: JarvisIOSUITests" in project
+
+
+def test_ios_scheme_uses_explicit_xcodegen_test_target_references() -> None:
+    project = PROJECT_YML.read_text(encoding="utf-8")
+    assert "        - target: JarvisIOSTests" in project
+    assert "        - target: JarvisIOSUITests" in project
+    assert "        - name: JarvisIOSTests" not in project
+    assert "        - name: JarvisIOSUITests" not in project
