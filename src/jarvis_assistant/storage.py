@@ -35,6 +35,8 @@ class SQLiteStore:
         if (connection is None) == (database_path is None):
             raise ValueError("provide either a connection or a database path")
         self._lock = RLock()
+        # Backward-compatible public alias used by bridge/device components.
+        self.lock = self._lock
         self._provided_connection = connection
         self._database_path = database_path
         self._thread_local = local()
@@ -85,7 +87,14 @@ class SQLiteStore:
                     ok integer not null,
                     result_summary text not null
                 );
-                pragma user_version = 1;
+                create table if not exists paired_devices (
+                    device_id text primary key,
+                    display_name text not null,
+                    created_at text not null,
+                    last_seen_at text not null,
+                    revoked integer not null default 0 check (revoked in (0, 1))
+                );
+                pragma user_version = 2;
                 """
             )
             self.connection.commit()

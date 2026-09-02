@@ -89,6 +89,37 @@ def test_injected_connection_api_remains_available_for_memory_tests() -> None:
     store.close()
 
 
+def test_store_exposes_shared_lock_for_bridge_components() -> None:
+    connection = sqlite3.connect(":memory:")
+    store = SQLiteStore(connection)
+
+    assert store.lock is store._lock  # noqa: SLF001
+    store.close()
+
+
+def test_open_migrates_paired_devices_schema(tmp_path) -> None:
+    database_path = tmp_path / "state.db"
+    legacy = sqlite3.connect(database_path)
+    legacy.execute("pragma user_version = 1")
+    legacy.close()
+
+    store = SQLiteStore.open(database_path)
+
+    columns = {
+        row[1]: (row[2], row[3], row[4], row[5])
+        for row in store.connection.execute("pragma table_info(paired_devices)")
+    }
+    assert columns == {
+        "device_id": ("TEXT", 0, None, 1),
+        "display_name": ("TEXT", 1, None, 0),
+        "created_at": ("TEXT", 1, None, 0),
+        "last_seen_at": ("TEXT", 1, None, 0),
+        "revoked": ("INTEGER", 1, "0", 0),
+    }
+    assert store.connection.execute("pragma user_version").fetchone()[0] == 2
+    store.close()
+
+
 class MemoryKeyring:
     def __init__(self) -> None:
         self.values: dict[tuple[str, str], str] = {}
