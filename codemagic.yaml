@@ -42,7 +42,7 @@ workflows:
           xcodebuild test \
             -project "$CM_BUILD_DIR/ios/JarvisIOS.xcodeproj" \
             -scheme JarvisIOS \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.4.1' \
             -only-testing:JarvisIOSTests/AppModelTests \
             -only-testing:JarvisIOSUITests/ConversationUITests \
             -derivedDataPath "$CM_BUILD_DIR/build/DerivedData" \
