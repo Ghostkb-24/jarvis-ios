@@ -129,6 +129,7 @@ elif [ "$errors" -eq 0 ]; then
     # XcodeGen versions emit different TestableReference XML details. Do not
     # hard-fail on BlueprintName text here; xcodebuild test below is the
     # authoritative validation of the generated scheme and test targets.
+    :
   fi
 
   if command -v "$xcodebuild_bin" >/dev/null 2>&1; then
