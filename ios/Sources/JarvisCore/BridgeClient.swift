@@ -372,7 +372,7 @@ public struct BridgeClient: Sendable {
             baseURL: rawURL,
             certificateFingerprint: payload.certificateFingerprint
         )
-        let baseURL = try validatedBaseURL(for: manualEndpoint)
+        let baseURL = try Self.validatedBaseURL(for: manualEndpoint)
         let transport = try transportFactory.makeTransport(
             certificateFingerprint: manualEndpoint.certificateFingerprint
         )
@@ -428,7 +428,7 @@ public struct BridgeClient: Sendable {
             throw BridgeError.invalidPairingResponse
         }
 
-        let baseURL = try validatedBaseURL(for: endpoint)
+        let baseURL = try Self.validatedBaseURL(for: endpoint)
         let transport = try transportFactory.makeTransport(
             certificateFingerprint: endpoint.certificateFingerprint
         )
