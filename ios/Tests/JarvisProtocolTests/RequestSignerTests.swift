@@ -7,7 +7,7 @@ final class RequestSignerTests: XCTestCase {
         let request = try Fixtures.openWeChatRequest()
 
         let payload = try RequestSigner.canonicalSigningPayload(for: request)
-        XCTAssertEqual(payload, request.canonicalData())
+        XCTAssertEqual(payload, try request.canonicalData())
     }
 
     func testHMACMatchesPythonFixtureAndUsesLowercaseHex() throws {
