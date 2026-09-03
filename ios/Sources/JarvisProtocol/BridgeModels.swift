@@ -1155,7 +1155,7 @@ private func validateTerminalState(_ state: TaskState) throws {
     }
 }
 
-private enum CanonicalJSON {
+enum CanonicalJSON {
     static func serialize(_ value: JSONValue) throws -> String {
         switch value {
         case .null:
