@@ -413,7 +413,7 @@ public final class AppModel: ObservableObject {
 
     static func launchConfigured(
         arguments: [String] = ProcessInfo.processInfo.arguments,
-        bridgeBootstrap: () -> ConfiguredBridgeRuntime? = loadConfiguredBridge
+        bridgeBootstrap: @MainActor @Sendable () -> ConfiguredBridgeRuntime? = loadConfiguredBridge
     ) -> AppModel {
         let isUITesting = arguments.contains("-ui-testing")
         guard isUITesting else {
