@@ -46,7 +46,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jarvisassistant.ios
-        PRODUCT_NAME: Jarvis
+        PRODUCT_NAME: JarvisIOS
         PRODUCT_MODULE_NAME: JarvisIOS
         CODE_SIGN_ENTITLEMENTS: JarvisIOS/JarvisIOS.entitlements
         CODE_SIGN_STYLE: Automatic
