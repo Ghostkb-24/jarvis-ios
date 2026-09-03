@@ -285,7 +285,7 @@ public final class AppModel: ObservableObject {
             if self == next { return true }
             if case .offline = next { return true }
 
-            switch (self, next) {
+            return switch (self, next) {
             case (.offline, .idle),
                  (.offline, .listening),
                  (.idle, .listening),
