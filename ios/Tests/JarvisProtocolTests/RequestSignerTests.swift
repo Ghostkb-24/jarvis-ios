@@ -88,7 +88,7 @@ final class RequestSignerTests: XCTestCase {
             version: 1,
             requestID: "req-1",
             deviceID: "iphone-1",
-            issuedAt: "2026-09-01T08:59:30Z",
+            issuedAt: "2026-09-01T09:00:00Z",
             idempotencyKey: "idem-1",
             kind: .tool,
             payload: ["tool": .string("open_application")]

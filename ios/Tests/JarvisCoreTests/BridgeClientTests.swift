@@ -608,7 +608,7 @@ private extension BridgeClientTests {
             bridgeID: "bridge-1",
             pairingCode: "123456",
             challengeNonce: "nonce-1",
-            issuedAt: "2026-08-31T00:00:00Z",
+            issuedAt: "2026-09-01T00:00:30Z",
             expiresAt: "2026-08-31T00:02:00Z"
         )
     }

@@ -50,7 +50,11 @@ final class BridgeModelsTests: XCTestCase {
 
     func testPairingPayloadDecodesDesktopQRFixture() throws {
         let fixtureURL = try XCTUnwrap(
-            Bundle.module.url(forResource: "pairing-payload", withExtension: "json")
+            Bundle.module.url(
+                forResource: "pairing-payload",
+                withExtension: "json",
+                subdirectory: "Fixtures"
+            )
         )
         let payload = try JSONDecoder().decode(
             PairingPayload.self,
