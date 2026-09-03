@@ -78,10 +78,8 @@ final class BridgeClientTests: XCTestCase {
         )
 
         XCTAssertEqual(factory.fingerprints, [discovery.certificateFingerprint])
-        XCTAssertEqual(
-            await client.connectionState(),
-            .paired(endpoint: .discovered(discovery), deviceID: "iphone-1")
-        )
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .paired(endpoint: .discovered(discovery), deviceID: "iphone-1"))
     }
 
     func testClientRejectsHTTPAndPublicManualEndpointsBeforeTransport() throws {
@@ -125,7 +123,8 @@ final class BridgeClientTests: XCTestCase {
         let response = try await client.submit(request)
 
         XCTAssertEqual(response.state, .awaitingConfirmation)
-        let sent = try XCTUnwrap((await transport.recordedRequests()).first)
+        let recordedRequests = await transport.recordedRequests()
+        let sent = try XCTUnwrap(recordedRequests.first)
         XCTAssertEqual(sent.url?.absoluteString, "https://192.168.1.20:8443/v1/requests")
         XCTAssertEqual(sent.httpMethod, "POST")
         XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Type"), "application/json")
@@ -133,10 +132,8 @@ final class BridgeClientTests: XCTestCase {
         let envelope = try JSONDecoder().decode(SignedRequestEnvelope.self, from: body)
         XCTAssertEqual(envelope.request, request)
         XCTAssertNoThrow(try RequestSigner.validate(signature: envelope.signature))
-        XCTAssertEqual(
-            await client.connectionState(),
-            .connected(endpoint: endpoint, deviceID: "iphone-1")
-        )
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .connected(endpoint: endpoint, deviceID: "iphone-1"))
     }
 
     func testStateChangingDisconnectDoesNotRetryAndMarksDisconnected() async throws {
@@ -158,11 +155,10 @@ final class BridgeClientTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? BridgeError, .resultUnknown)
         }
-        XCTAssertEqual(await transport.requestCount(), 1)
-        XCTAssertEqual(
-            await client.connectionState(),
-            .disconnected(endpoint: endpoint, deviceID: "iphone-1", canRetryReads: true)
-        )
+        let requestCount = await transport.requestCount()
+        XCTAssertEqual(requestCount, 1)
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .disconnected(endpoint: endpoint, deviceID: "iphone-1", canRetryReads: true))
     }
 
     func testReadOnlyStatusRetriesAfterDisconnectAndReconnects() async throws {
@@ -187,8 +183,10 @@ final class BridgeClientTests: XCTestCase {
         let response = try await client.status(for: "req-1", authentication: authentication)
 
         XCTAssertEqual(response.requestID, "req-1")
-        XCTAssertEqual(await transport.requestCount(), 2)
-        XCTAssertEqual(await client.connectionState(), .connected(endpoint: endpoint, deviceID: "iphone-1"))
+        let requestCount = await transport.requestCount()
+        XCTAssertEqual(requestCount, 2)
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .connected(endpoint: endpoint, deviceID: "iphone-1"))
     }
 
     func testPairingChallengeExchangePersistsOnlyIdentityAndSecretAfterValidFreshResponse() async throws {
@@ -215,8 +213,10 @@ final class BridgeClientTests: XCTestCase {
         XCTAssertEqual(factory.fingerprints, [discovery.certificateFingerprint])
         XCTAssertEqual(credentials, try store.load())
         XCTAssertEqual(security.addedItems.count, 2)
-        XCTAssertEqual(await transport.requestCount(), 1)
-        let sent = try XCTUnwrap((await transport.recordedRequests()).first)
+        let requestCount = await transport.requestCount()
+        XCTAssertEqual(requestCount, 1)
+        let recordedRequests = await transport.recordedRequests()
+        let sent = try XCTUnwrap(recordedRequests.first)
         XCTAssertEqual(sent.url?.path, "/v1/pair/claim")
         let claim = try XCTUnwrap(
             JSONSerialization.jsonObject(with: try XCTUnwrap(sent.httpBody)) as? [String: String]
@@ -253,7 +253,8 @@ final class BridgeClientTests: XCTestCase {
         }
         XCTAssertNil(try store.load())
         XCTAssertTrue(security.addedItems.isEmpty)
-        XCTAssertEqual(await transport.requestCount(), 0)
+        let requestCount = await transport.requestCount()
+        XCTAssertEqual(requestCount, 0)
     }
 
     func testPairingAcceptsServerIssuedDeviceIdentity() async throws {
@@ -428,7 +429,8 @@ final class BridgeClientTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? BridgeError, .httpStatus(503))
         }
-        XCTAssertEqual(await client.connectionState(), .paired(endpoint: endpoint, deviceID: "iphone-1"))
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .paired(endpoint: endpoint, deviceID: "iphone-1"))
     }
 
     func testReadOnlyProtocolFailureReturnsToPairedState() async throws {
@@ -453,7 +455,8 @@ final class BridgeClientTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? BridgeError, .invalidProtocolResponse)
         }
-        XCTAssertEqual(await client.connectionState(), .paired(endpoint: endpoint, deviceID: "iphone-1"))
+        let state = await client.connectionState()
+        XCTAssertEqual(state, .paired(endpoint: endpoint, deviceID: "iphone-1"))
     }
 
     func testConfirmationAndCancellationSerializeTaskConfirmationPayload() async throws {
