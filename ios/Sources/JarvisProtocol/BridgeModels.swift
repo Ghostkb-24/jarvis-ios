@@ -1115,20 +1115,12 @@ public enum ProtocolValidation {
 
 private enum TimestampParser {
     static func parse(_ value: String) -> Date? {
-        internetDateTime.date(from: value) ?? fractionalInternetDateTime.date(from: value)
-    }
-
-    private static let internetDateTime: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
-
-    private static let fractionalInternetDateTime: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: value) { return date }
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+        return formatter.date(from: value)
+    }
 }
 
 private func validateVersion(_ version: Int) throws {
