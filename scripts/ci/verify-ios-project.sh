@@ -109,7 +109,19 @@ else
   done
 
   for test_target in JarvisIOSTests JarvisIOSUITests; do
-    if ! contains_text_in_section "schemes" "- name: $test_target"; then
+    # XcodeGen's current schema uses `target:` for scheme test entries. Older
+    # manifests used `name:`, so accept both spellings while validating the
+    # actual target value rather than coupling CI to one YAML representation.
+    if ! awk -v expected="$test_target" '
+      $0 == "schemes:" { in_schemes = 1; next }
+      in_schemes && /^[^[:space:]]/ { exit }
+      in_schemes && $0 ~ /^[[:space:]]+- (target|name):[[:space:]]*/ {
+        value = $0
+        sub(/^[[:space:]]+- (target|name):[[:space:]]*/, "", value)
+        if (value == expected) { found = 1; exit }
+      }
+      END { exit found ? 0 : 1 }
+    ' "$project_yml"; then
       error "Required test target '$test_target' is missing from the JarvisIOS scheme in $project_yml."
     fi
   done
