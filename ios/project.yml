@@ -102,6 +102,8 @@ schemes:
     build:
       targets:
         JarvisIOS: all
+        JarvisIOSTests: [test]
+        JarvisIOSUITests: [test]
     run:
       config: Debug
     test:
