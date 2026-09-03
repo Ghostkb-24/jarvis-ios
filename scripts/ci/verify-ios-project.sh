@@ -112,7 +112,7 @@ else
     # XcodeGen's current schema uses `target:` for scheme test entries. Older
     # manifests used `name:`, so accept both spellings while validating the
     # actual target value rather than coupling CI to one YAML representation.
-    if ! grep -Eq "^[[:space:]]+-[[:space:]]+(target|name):[[:space:]]*$test_target[[:space:]]*$" "$project_yml"; then
+    if ! grep -Eq "^[[:space:]]+(-[[:space:]]+$test_target|-[[:space:]]+(target|name):[[:space:]]*$test_target)[[:space:]]*$" "$project_yml"; then
       error "Required test target '$test_target' is missing from the JarvisIOS scheme in $project_yml."
     fi
   done

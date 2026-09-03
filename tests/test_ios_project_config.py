@@ -36,5 +36,5 @@ def test_ios_test_targets_have_explicit_product_names_for_xcodegen_schemes() -> 
 
 def test_ios_scheme_uses_xcodegen_test_target_names() -> None:
     project = PROJECT_YML.read_text(encoding="utf-8")
-    assert "        - name: JarvisIOSTests" in project
-    assert "        - name: JarvisIOSUITests" in project
+    assert "        - JarvisIOSTests" in project
+    assert "        - JarvisIOSUITests" in project
