@@ -230,7 +230,7 @@ public struct BridgeClient: Sendable {
         transportFactory: any PinnedTransportFactory = URLSessionPinnedTransportFactory(),
         retryPolicy: BridgeRetryPolicy = .safeReadsOnly()
     ) throws {
-        let baseURL = try validatedBaseURL(for: endpoint)
+        let baseURL = try Self.validatedBaseURL(for: endpoint)
         let transport = try transportFactory.makeTransport(
             certificateFingerprint: endpoint.certificateFingerprint
         )
