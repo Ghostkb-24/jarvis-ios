@@ -417,7 +417,7 @@ final class AppModelTests: XCTestCase {
         model.cancelPreview(preview)
         let settled = await waitUntil { model.phase == .failed }
         XCTAssertTrue(settled)
-        XCTAssertEqual(model.notice, "涉及付款，已拒绝执行。")
+        XCTAssertEqual(model.notice, "涉及付款，Jarvis 不会代你确认或付款。")
     }
 
     @MainActor
@@ -555,8 +555,7 @@ final class AppModelTests: XCTestCase {
             client: client,
             deviceID: "unit-test-iphone",
             phase: phase,
-            device: device ?? connectedDevice,
-            syncBridgeStateOnInit: false
+            device: device ?? connectedDevice
         )
     }
 
