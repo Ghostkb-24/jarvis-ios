@@ -54,6 +54,7 @@ struct ActionPreviewSheet: View {
                                 .foregroundStyle(JarvisTheme.primaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
+                                .accessibilityLabel("\(detail.label)：\(detail.value)")
 
                             if detail.id != preview.details.last?.id {
                                 Divider().overlay(Color.white.opacity(0.10))
