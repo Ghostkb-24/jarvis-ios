@@ -54,7 +54,7 @@ final class BridgeModelsTests: XCTestCase {
                 forResource: "pairing-payload",
                 withExtension: "json",
                 subdirectory: "Fixtures"
-            )
+            ) ?? Bundle.module.url(forResource: "pairing-payload", withExtension: "json")
         )
         let payload = try JSONDecoder().decode(
             PairingPayload.self,

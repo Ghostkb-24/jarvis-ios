@@ -71,7 +71,7 @@ final class RequestSignerTests: XCTestCase {
         XCTAssertThrowsError(
             try RequestSigner.validateRequestMetadata(
                 request,
-                now: Date(timeIntervalSince1970: 1_788_251_400),
+                now: Date(timeIntervalSince1970: 1_788_253_200),
                 maxAge: 300,
                 maxFutureSkew: 30
             )
