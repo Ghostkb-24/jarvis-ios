@@ -41,7 +41,7 @@ final class AppModelTests: XCTestCase {
         let client = ControllableBridgeClient(
             initialConnectionState: .unpaired(endpoint: .discovered(try discoveryMessage()))
         )
-        let model = makeModel(client: client)
+        let model = makeModel(client: client, syncState: true)
 
         let synced = await waitUntil { model.statusTitle == "等待完成配对" }
         XCTAssertTrue(synced)
@@ -59,7 +59,7 @@ final class AppModelTests: XCTestCase {
                 deviceID: "unit-test-iphone"
             )
         )
-        let model = makeModel(client: client, phase: .offline, device: .offline)
+        let model = makeModel(client: client, phase: .offline, device: .offline, syncState: true)
 
         let synced = await waitUntil { model.phase == .idle }
         XCTAssertTrue(synced)
@@ -77,7 +77,7 @@ final class AppModelTests: XCTestCase {
                 deviceID: "saved-iphone"
             )
         )
-        let model = makeModel(client: client, phase: .offline, device: .offline)
+        let model = makeModel(client: client, phase: .offline, device: .offline, syncState: true)
 
         let synced = await waitUntil {
             model.device.isPaired && model.device.isConnected && model.phase == .idle
@@ -549,13 +549,15 @@ final class AppModelTests: XCTestCase {
     private func makeModel(
         client: ControllableBridgeClient,
         phase: AppModel.Phase = .idle,
-        device: DeviceSnapshot? = nil
+        device: DeviceSnapshot? = nil,
+        syncState: Bool = false
     ) -> AppModel {
         AppModel(
             client: client,
             deviceID: "unit-test-iphone",
             phase: phase,
-            device: device ?? connectedDevice
+            device: device ?? connectedDevice,
+            syncBridgeStateOnInit: syncState
         )
     }
 
