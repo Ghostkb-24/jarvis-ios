@@ -1,4 +1,5 @@
 import Foundation
+import JarvisCore
 import JarvisProtocol
 import XCTest
 @testable import JarvisIOS
@@ -544,13 +545,13 @@ final class AppModelTests: XCTestCase {
     private func makeModel(
         client: ControllableBridgeClient,
         phase: AppModel.Phase = .idle,
-        device: DeviceSnapshot = connectedDevice
+        device: DeviceSnapshot? = nil
     ) -> AppModel {
         AppModel(
             client: client,
             deviceID: "unit-test-iphone",
             phase: phase,
-            device: device
+            device: device ?? connectedDevice
         )
     }
 

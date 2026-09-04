@@ -1,4 +1,5 @@
 import AVFAudio
+import JarvisCore
 import JarvisProtocol
 import XCTest
 @testable import JarvisIOS
