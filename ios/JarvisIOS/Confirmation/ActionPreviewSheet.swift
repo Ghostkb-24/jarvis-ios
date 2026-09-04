@@ -82,6 +82,8 @@ struct ActionPreviewSheet: View {
                                     .background(JarvisTheme.accent)
                                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
+                            .accessibilityIdentifier("允许并发送")
+                            .accessibilityLabel("允许并发送")
                             .buttonStyle(.plain)
                             .accessibilityLabel(preview.primaryButtonTitle)
                         }
