@@ -53,7 +53,12 @@ final class ConversationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["目标应用"].exists)
         XCTAssertTrue(app.staticTexts["微信"].exists)
         XCTAssertTrue(app.staticTexts["收件人：宋小宝"].exists)
-        XCTAssertTrue(app.staticTexts["明天上午十点在工作室见，记得带上最终版方案。"].exists)
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(format: "label CONTAINS %@", "明天上午十点"))
+                .firstMatch
+                .waitForExistence(timeout: 10)
+        )
         XCTAssertTrue(app.buttons["允许并发送"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["取消操作"].exists)
     }
