@@ -555,7 +555,8 @@ final class AppModelTests: XCTestCase {
             client: client,
             deviceID: "unit-test-iphone",
             phase: phase,
-            device: device ?? connectedDevice
+            device: device ?? connectedDevice,
+            syncBridgeStateOnInit: false
         )
     }
 
