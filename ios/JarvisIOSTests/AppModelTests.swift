@@ -85,7 +85,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(synced)
         XCTAssertEqual(model.device.connectionStatus, "已配对，等待请求连接")
         XCTAssertTrue(model.submit(text: "首次认证请求"))
-        XCTAssertTrue(await waitForSubmitCount(1, client: client))
+        let didSubmit = await waitForSubmitCount(1, client: client)
+        XCTAssertTrue(didSubmit)
     }
 
     @MainActor
@@ -449,7 +450,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(didConfirm)
         XCTAssertEqual(model.phase, .executing)
 
-        let confirmation = try XCTUnwrap(await client.confirmations().first)
+        let confirmations = await client.confirmations()
+        let confirmation = try XCTUnwrap(confirmations.first)
         await client.failConfirmation(
             requestID: confirmation.request.requestID,
             with: BridgeError.requestRejected(
@@ -486,7 +488,8 @@ final class AppModelTests: XCTestCase {
         )
         let didSubmit = await waitForSubmitCount(1, client: client)
         XCTAssertTrue(didSubmit)
-        let request = try XCTUnwrap(await client.submittedRequests().first)
+        let submittedRequests = await client.submittedRequests()
+        let request = try XCTUnwrap(submittedRequests.first)
 
         await client.failSubmit(
             requestID: request.requestID,
@@ -521,7 +524,8 @@ final class AppModelTests: XCTestCase {
         )
         let didSubmit = await waitForSubmitCount(1, client: client)
         XCTAssertTrue(didSubmit)
-        let request = try XCTUnwrap(await client.submittedRequests().first)
+        let submittedRequests = await client.submittedRequests()
+        let request = try XCTUnwrap(submittedRequests.first)
 
         await client.failSubmit(
             requestID: request.requestID,
